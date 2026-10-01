@@ -27,9 +27,14 @@ async function render(view) {
         <div class="field"><label>并发任务 -l</label><input type="number" id="s-limit" value="${cfg.limit ?? 2}" min="1" max="32"></div>
         <div class="field"><label>任务间隔(秒)</label><input type="number" id="s-delay" value="${cfg.delay ?? 0}" min="0"></div>
       </div>
-      <div class="field"><label>下载并发连接数（每文件）</label>
-        <input type="number" id="s-connections" value="${cfg.connections ?? 48}" min="1" max="64">
-        <span class="hint">决定下载速度，越大越快（实测 1→0.1、8→1.2、16→2.8、32→3.4、48→5.4 MB/s）；过大可能触发 Telegram 限流，建议 32–48</span></div>
+      <div class="grid c2">
+        <div class="field"><label>下载并发连接数（每文件）</label>
+          <input type="number" id="s-connections" value="${cfg.connections ?? 48}" min="1" max="64">
+          <span class="hint">决定单文件速度，越大越快（实测 1→0.1、8→1.2、16→2.8、48→5.4 MB/s）；建议 32–48</span></div>
+        <div class="field"><label>同时下载的文件数</label>
+          <input type="number" id="s-fileconc" value="${cfg.fileConcurrency ?? 3}" min="1" max="16">
+          <span class="hint">多链接时多个文件同时下载，避免都排在第一个大文件后面；总连接数会分摊到这些文件</span></div>
+      </div>
       <button class="btn primary" id="s-save">保存设置</button>
       <span class="hint muted small" style="margin-left:8px">保存到 SQLite（app_state）与 gui/data/gui-config.json</span>
       </div>
@@ -99,6 +104,7 @@ async function render(view) {
     limit: Number(view.querySelector('#s-limit').value) || 2,
     delay: Number(view.querySelector('#s-delay').value) || 0,
     connections: Number(view.querySelector('#s-connections').value) || 48,
+    fileConcurrency: Number(view.querySelector('#s-fileconc').value) || 3,
   }, view.querySelector('#s-save'));
 
   view.querySelector('#s-save-dl').onclick = () => saveConfig({

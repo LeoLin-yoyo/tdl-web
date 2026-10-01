@@ -45,6 +45,9 @@ const DEFAULTS = {
   // Parallel HTTP connections used per file. Measured against a 1.7GB file:
   // 1 conn ~0.1 MB/s, 8 ~1.2, 16 ~2.8, 32 ~3.4, 48 ~5.4 MB/s.
   connections: 48,
+  // How many files download at once. >1 keeps every pasted link progressing
+  // instead of queueing behind a single large file.
+  fileConcurrency: 3,
 };
 
 let cache = null;
@@ -85,7 +88,7 @@ function save(patch) {
   const cur = load();
   const next = { ...cur, ...patch };
   // type coercion for numeric fields
-  for (const k of ['threads', 'limit', 'delay', 'reconnectTimeout', 'connections']) {
+  for (const k of ['threads', 'limit', 'delay', 'reconnectTimeout', 'connections', 'fileConcurrency']) {
     next[k] = Number(next[k]) >= 0 ? Number(next[k]) : DEFAULTS[k];
   }
   for (const k of ['group', 'skipSame', 'rewriteExt', 'takeout', 'desc']) {
@@ -124,6 +127,7 @@ function downloadDefaults() {
     takeout: !!c.takeout,
     desc: !!c.desc,
     connections: Number(c.connections) > 0 ? Number(c.connections) : DEFAULTS.connections,
+    fileConcurrency: Number(c.fileConcurrency) > 0 ? Number(c.fileConcurrency) : DEFAULTS.fileConcurrency,
   };
 }
 

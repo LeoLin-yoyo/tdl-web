@@ -382,6 +382,7 @@ async function runDownloadTask(t, cfg) {
         dir: t.dir,
         signal: ac.signal,
         connections: Number(t.config.connections) || config.load().connections,
+        fileConcurrency: Number(t.config.fileConcurrency) || config.load().fileConcurrency,
         onFile: (info) => {
           const it = ensureItem(t, info.name);
           Object.assign(it, {
@@ -529,6 +530,7 @@ function freezeDlConfig(cfg) {
     takeout: cfg.takeout === undefined ? d.takeout : bool(cfg.takeout),
     desc: cfg.desc === undefined ? d.desc : bool(cfg.desc),
     connections: num(cfg.connections, d.connections),
+    fileConcurrency: num(cfg.fileConcurrency, d.fileConcurrency),
   };
 }
 

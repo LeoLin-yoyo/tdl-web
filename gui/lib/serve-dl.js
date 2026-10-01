@@ -32,6 +32,9 @@ const BLOCK = 8 * 1024 * 1024;
 // down if Telegram starts rate limiting.
 const DEFAULT_CONNECTIONS = 48;
 const MAX_CONNECTIONS = 64;
+// How many files are transferred at the same time. Multiple URLs should all
+// start progressing instead of queueing behind one large file.
+const DEFAULT_FILE_CONCURRENCY = 3;
 
 // Reject anything that is not plain http on a loopback address. The base URL is
 // always built by our own code from the local serve port, so this is a second
@@ -227,10 +230,13 @@ async function fetchFile({ url, dest, total, connections, onProgress, signal }) 
 
 /**
  * Download every file the serve session exposes into dir, resuming partials.
+ * Files are fetched CONCURRENTLY: with a big first file, a strictly serial loop
+ * would leave the remaining files untouched for a very long time, which looks
+ * like "only one resource is downloading".
  * onFile(info) reports per-file state; onProgress(done, total, info) reports bytes.
  * Throws { name: 'AbortError' } when the signal aborts (pause).
  */
-async function downloadAll({ base, dir, onFile, onProgress, signal, connections }) {
+async function downloadAll({ base, dir, onFile, onProgress, signal, connections, fileConcurrency }) {
   assertLoopback(base);
   const abortErr = () => Object.assign(new Error('paused'), { name: 'AbortError' });
 
@@ -238,14 +244,24 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections 
   const items = parseIndex(await indexRes.text());
 
   fs.mkdirSync(dir, { recursive: true });
-  const results = [];
 
-  for (const item of items) {
+  // Split the connection budget across the files being fetched in parallel so
+  // the total number of sockets stays bounded.
+  const files = Math.max(1, Math.min(fileConcurrency || DEFAULT_FILE_CONCURRENCY, items.length || 1));
+  const perFile = Math.max(1,
+    Math.floor((Math.min(connections || DEFAULT_CONNECTIONS, MAX_CONNECTIONS)) / files));
+
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  const runOne = async (idx) => {
+    const item = items[idx];
     if (signal && signal.aborted) throw abortErr();
 
     const head = await fetch(`${base}/${item}`, { method: 'HEAD' });
     const total = Number(head.headers.get('content-length') || 0);
-    if (!total) continue;
+    if (!total) { results[idx] = null; return; }
+
     const name = filenameFrom(head.headers, String(item).split('/').pop());
     const dest = path.join(dir, name);
     const info = { name, path: dest, size: total };
@@ -253,8 +269,8 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections 
     // finished in an earlier run
     if (fs.existsSync(dest) && fs.statSync(dest).size === total) {
       if (onFile) onFile({ ...info, state: 'done' });
-      results.push({ ...info, state: 'done' });
-      continue;
+      results[idx] = { ...info, state: 'done' };
+      return;
     }
 
     if (onFile) onFile({ ...info, state: 'active' });
@@ -262,17 +278,28 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections 
       url: `${base}/${item}`,
       dest,
       total,
-      connections,
+      connections: perFile,
       signal,
       onProgress: (d, t) => { if (onProgress) onProgress(d, t, info); },
     });
     if (onFile) onFile({ ...info, state: 'done' });
-    results.push({ ...info, state: 'done' });
-  }
-  return results;
+    results[idx] = { ...info, state: 'done' };
+  };
+
+  const workers = Array.from({ length: files }, async () => {
+    while (true) {
+      if (signal && signal.aborted) throw abortErr();
+      const idx = cursor++;
+      if (idx >= items.length) return;
+      await runOne(idx);
+    }
+  });
+  await Promise.all(workers);
+
+  return results.filter(Boolean);
 }
 
 module.exports = {
   downloadAll, parseIndex, assertLoopback, filenameFrom,
-  fetchFile, BLOCK, DEFAULT_CONNECTIONS, MAX_CONNECTIONS,
+  fetchFile, BLOCK, DEFAULT_CONNECTIONS, MAX_CONNECTIONS, DEFAULT_FILE_CONCURRENCY,
 };
