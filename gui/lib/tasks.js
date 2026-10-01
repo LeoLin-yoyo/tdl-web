@@ -29,6 +29,16 @@ function strList(v) {
 }
 function str(v, dflt = '') { return (v === undefined || v === null) ? dflt : String(v).trim(); }
 function bool(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
+
+// Human-readable transfer rate, e.g. 1536 -> "1.50 KB/s".
+function fmtBps(bps) {
+  const n = Number(bps);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(2)} ${units[i]}`;
+}
 function num(v, dflt) { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : dflt; }
 
 // tdl matches --include/--exclude extensions with a case-sensitive comparison
@@ -163,10 +173,22 @@ const TYPES = {
 function ensureItem(t, name) {
   let it = t.items.get(name);
   if (!it) {
-    it = { name, label: name, path: '', done: 0, total: 0, pct: 0, speed: '', etaMs: 0, state: 'active', updatedAt: Date.now() };
+    it = {
+      name, label: name, path: '', done: 0, total: 0, pct: 0,
+      speed: '', speedBps: 0, etaMs: 0, state: 'active', updatedAt: Date.now(),
+    };
     t.items.set(name, it);
   }
   return it;
+}
+
+// tdl prints rates as text ("376.30KB/s"); parse them so the card can total
+// them numerically alongside the HTTP-path numbers.
+function parseBps(s) {
+  const m = String(s || '').match(/([\d.]+)\s*([KMG]?B)\/s/i);
+  if (!m) return 0;
+  const mult = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 }[m[2].toUpperCase()] || 1;
+  return Math.round(parseFloat(m[1]) * mult);
 }
 
 function handleLine(t, line) {
@@ -177,7 +199,8 @@ function handleLine(t, line) {
       Object.assign(it, {
         label: ev.label || it.label, path: ev.path || it.path,
         done: ev.doneBytes, total: ev.total, pct: ev.pct,
-        speed: ev.speed, etaMs: ev.etaMs, state: 'active', updatedAt: Date.now(),
+        speed: ev.speed, speedBps: parseBps(ev.speed),
+        etaMs: ev.etaMs, state: 'active', updatedAt: Date.now(),
       });
       break;
     }
@@ -247,7 +270,8 @@ function snapshot(t, { withLogs = false } = {}) {
   const doneCount = [...t.items.values()].filter((i) => i.state === 'done').length;
   const totalBytes = items.reduce((s, i) => s + (i.total || 0), 0);
   const doneBytes = items.reduce((s, i) => s + (i.done || 0), 0);
-  const speedParts = items.filter((i) => i.state === 'active' && i.speed).map((i) => i.speed);
+  // sum the numeric rates (not the label strings) for an accurate card total
+  const totalBps = items.reduce((s, i) => s + (i.state === 'active' ? (i.speedBps || 0) : 0), 0);
   return {
     id: t.id, type: t.type, title: t.title, ns: t.config.ns || config.load().ns,
     status: t.status, error: t.error, exitCode: t.exitCode,
@@ -262,7 +286,7 @@ function snapshot(t, { withLogs = false } = {}) {
       itemsKnown: t.items.size, done: doneCount, failed: t.failedItems,
       active: [...t.items.values()].filter((i) => i.state === 'active').length,
       totalBytes, doneBytes,
-      speed: speedParts.join(' + '),
+      speed: fmtBps(totalBps),
     },
     items,
     logs: withLogs ? t.logs.slice(-120) : undefined,
@@ -395,10 +419,28 @@ async function runDownloadTask(t, cfg) {
         },
         onProgress: (done, total, info) => {
           const it = ensureItem(t, info.name);
+          // speed = bytes gained since the previous sample / elapsed time.
+          // Smoothed over ~1s so the number stays readable.
+          const now = Date.now();
+          if (it.speedAt && now > it.speedAt) {
+            const dt = now - it.speedAt;
+            const db = done - (it.speedBytes || 0);
+            if (dt >= 900 && db >= 0) {
+              const inst = db / (dt / 1000);
+              // exponential smoothing keeps brief stalls from flickering the value
+              it.speedBps = it.speedBps ? Math.round(it.speedBps * 0.4 + inst * 0.6) : Math.round(inst);
+              it.speedAt = now;
+              it.speedBytes = done;
+            }
+          } else {
+            it.speedAt = now;
+            it.speedBytes = done;
+          }
           Object.assign(it, {
             label: info.name, path: info.path, done, total,
             pct: total ? Math.round((done / total) * 100) : 0,
-            state: 'active', updatedAt: Date.now(),
+            speed: it.speedBps ? fmtBps(it.speedBps) : '',
+            state: 'active', updatedAt: now,
           });
           t.dirty = true;
         },

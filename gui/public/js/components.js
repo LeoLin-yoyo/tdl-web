@@ -5,10 +5,14 @@ import { api, esc, fmtBytes, fmtDur, fmtTime, modal, toast, notify, store, loadC
 // ---- task card ---------------------------------------------------------------
 
 function itemRow(it) {
-  const pct = it.total > 0 ? Math.min(100, Math.round((it.done / it.total) * 100)) : (it.state === 'done' ? 100 : it.pct || 0);
+  // The card already carries a progress bar, so the row shows the numbers that
+  // the bar cannot: current speed while running, and the final size when done.
   const right = it.state === 'done'
     ? fmtBytes(it.size || it.total)
     : `${fmtBytes(it.done)}${it.total ? ' / ' + fmtBytes(it.total) : ''}`;
+  const speed = it.state === 'active'
+    ? `<span class="item-speed">${esc(it.speed || '—')}</span>`
+    : '';
   // tdl reports the absolute destination path in its progress line
   const pathLine = it.path
     ? `<div class="item-path mono" title="${esc(it.path)}">${esc(it.path)}</div>`
@@ -16,8 +20,8 @@ function itemRow(it) {
   return `
     <div class="item-row state-${esc(it.state)}">
       <div class="name" title="${esc(it.label || it.name)}">${esc(it.label || it.name)}</div>
-      <div><div class="progress sm ${it.state === 'done' ? 'ok' : ''}"><div style="width:${pct}%"></div></div></div>
-      <div class="meta">${esc(right)}${it.state === 'active' && it.speed ? `<br>${esc(it.speed)}` : ''}</div>
+      <div class="meta">${esc(right)}</div>
+      <div class="meta">${speed}</div>
       ${pathLine}
     </div>`;
 }

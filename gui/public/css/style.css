@@ -203,11 +203,12 @@ details.adv .adv-body { padding-top: 10px; }
   word-break: break-all; display: none;
 }
 .item-row {
-  display: grid; grid-template-columns: 1fr 120px 74px; gap: 12px; align-items: center;
+  display: grid; grid-template-columns: 1fr 130px 82px; gap: 12px; align-items: center;
   padding: 6px 0; border-top: 1px solid var(--border-soft); font-size: 12.3px;
 }
 .item-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .item-row .meta { color: var(--muted); font-size: 11.5px; text-align: right; white-space: nowrap; }
+.item-row .item-speed { color: var(--accent); font-variant-numeric: tabular-nums; }
 /* absolute destination path reported by tdl, spanning the full row */
 .item-row .item-path {
   grid-column: 1 / -1; font-size: 10.8px; color: var(--muted); opacity: .85;
