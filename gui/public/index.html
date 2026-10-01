@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tdl Web GUI</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232AABEE'/%3E%3Cpath d='M8 17l4 2 8-7-6 8 .5 4 2.5-3 5 2 2-14z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">TG</div>
+        <div class="brand-name">tdl <span>Web GUI</span></div>
+      </div>
+      <nav id="nav">
+        <a href="#/dashboard" data-page="dashboard"><span class="ico">◧</span>仪表盘</a>
+        <div class="nav-group">任务</div>
+        <a href="#/download" data-page="download"><span class="ico">↓</span>下载</a>
+        <a href="#/forward" data-page="forward"><span class="ico">⇄</span>转发</a>
+        <a href="#/upload" data-page="upload"><span class="ico">↑</span>上传</a>
+        <a href="#/export" data-page="export"><span class="ico">▣</span>导出消息</a>
+        <div class="nav-group">工具</div>
+        <a href="#/files" data-page="files"><span class="ico">▤</span>文件</a>
+        <a href="#/login" data-page="login"><span class="ico">◍</span>账号登录</a>
+        <a href="#/settings" data-page="settings"><span class="ico">⚙</span>设置</a>
+      </nav>
+      <div id="sidebar-footer">
+        <div id="nav-queue" class="queue-chip hidden"></div>
+        <div id="nav-version" class="muted small"></div>
+      </div>
+    </aside>
+    <main id="main">
+      <header id="topbar">
+        <h1 id="page-title">仪表盘</h1>
+        <div id="topbar-right">
+          <span id="conn-dot" class="conn-dot" title="实时连接"></span>
+          <span id="account-chip" class="chip" title="账号状态"></span>
+        </div>
+      </header>
+      <div id="view"></div>
+    </main>
+  </div>
+  <div id="toasts"></div>
+  <div id="modal-root"></div>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

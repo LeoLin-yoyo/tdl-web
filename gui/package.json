@@ -1,0 +1,17 @@
+{
+  "name": "tdl-web-gui",
+  "version": "1.0.0",
+  "description": "Web GUI for the prebuilt tdl CLI (Telegram Downloader)",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
+}
