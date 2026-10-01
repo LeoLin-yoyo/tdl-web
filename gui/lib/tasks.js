@@ -534,7 +534,9 @@ function freezeDlConfig(cfg) {
   };
 }
 
-function create(type, rawConfig) {
+// Create one task. Kept internal so `create` can fan a multi-link request out
+// into one task per link.
+function createOne(type, rawConfig) {
   const builder = TYPES[type];
   if (!builder) return { error: '未知任务类型' };
   // resolve download defaults now so the stored source is complete and a later
@@ -565,6 +567,40 @@ function create(type, rawConfig) {
     emit('task', snapshot(t, { withLogs: true }));
   });
   return { task: snapshot(t) };
+}
+
+// A download request may carry several links / export files. Each one becomes
+// its own task card, so the list reads "one row per link" instead of a single
+// card containing many nested files.
+function create(type, rawConfig) {
+  const builder = TYPES[type];
+  if (!builder) return { error: '未知任务类型' };
+
+  if (type === 'dl') {
+    const cfg = rawConfig || {};
+    const urls = strList(cfg.urls);
+    const files = strList(cfg.files);
+
+    // Nothing to split when there is at most one source in total.
+    if (urls.length + files.length > 1) {
+      const made = [];
+      // one task per link, and one task per export file
+      for (const u of urls) made.push(createOne(type, { ...cfg, urls: [u], files: [] }));
+      for (const f of files) made.push(createOne(type, { ...cfg, urls: [], files: [f] }));
+
+      const failed = made.filter((r) => r.error);
+      if (!made.length || failed.length === made.length) {
+        return { error: failed[0]?.error || '创建任务失败' };
+      }
+      return {
+        task: made[0].task,             // kept for callers that read a single task
+        tasks: made.filter((r) => r.task).map((r) => r.task),
+        count: made.filter((r) => r.task).length,
+      };
+    }
+  }
+
+  return createOne(type, rawConfig);
 }
 
 function cancel(id) {

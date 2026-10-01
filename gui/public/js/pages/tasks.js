@@ -48,9 +48,11 @@ function dlForm() {
       <textarea id="f-urls" rows="4" placeholder="https://t.me/tdl/10"></textarea>
       <div><button class="btn sm" id="pick-chat-btn" type="button">从会话列表挑选 ↗</button>
       <span class="hint">选中后插入 https://t.me/用户名 链接，请自行补上 /消息ID（可加起止范围 /起/止）</span></div>
+      <span class="hint">每行链接会生成一张独立的任务卡片，可单独暂停/继续</span>
     </div>
     <div class="field"><label>或：tdl export 生成的 JSON 文件（每行一个绝对路径）</label>
-      <textarea id="f-files" rows="2" placeholder="D:\\data\\tdl-export.json"></textarea></div>
+      <textarea id="f-files" rows="2" placeholder="D:\\data\\tdl-export.json"></textarea>
+      <span class="hint">同样每个文件生成一张独立的任务卡片</span></div>
     <div class="field"><label>下载目录 --dir</label>
       <input type="text" id="f-dir" data-recent="dl.dir" list="dl-dir-list" autocomplete="off"
              value="${esc(d.dir || '')}" placeholder="选择或输入目录">
@@ -295,8 +297,9 @@ function makeTaskPage({ type, form, submit }) {
       const btn = view.querySelector('#create-btn');
       btn.disabled = true;
       try {
-        await submit();
-        toast('任务已创建，加入队列', 'ok');
+        const r = await submit();
+        const n = (r && r.count) || 1;
+        toast(n > 1 ? `已创建 ${n} 个任务（每条链接一个），排队执行` : '任务已创建，加入队列', 'ok');
         // clear the "source" inputs to prevent accidental duplicate creation
         for (const id of CLEAR_AFTER_SUBMIT[type] || []) {
           const el = view.querySelector(`#${id}`);
