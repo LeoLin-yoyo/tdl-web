@@ -277,6 +277,10 @@ function snapshot(t, { withLogs = false } = {}) {
     status: t.status, error: t.error, exitCode: t.exitCode,
     createdAt: t.createdAt, startedAt: t.startedAt, finishedAt: t.finishedAt,
     args: t.displayArgs,
+    // the original request, shown on the card: pasted message link(s) and any
+    // export-JSON files
+    urls: strList(t.config.urls),
+    files: strList(t.config.files),
     // lets the UI offer 暂停 / 继续 and show that a resume is happening
     canPause: t.status === 'running' && !!t.handle,
     canResume: canResumeTask(t.type, t.status, t.id),
@@ -300,13 +304,28 @@ function publicList() {
   // still show where each file landed; canResume reflects the saved source.
   const hist = history
     .filter((t) => !histIds.has(t.id))
-    .map((t) => ({
-      ...t,
-      items: t.items || [],
-      logs: [],
-      canPause: false,
-      canResume: canResumeTask(t.type, t.status, t.id),
-    }));
+    .map((t) => {
+      // older history snapshots predate the urls/files fields — backfill them
+      // from the saved task source so their cards still show the original link
+      let extra = t;
+      if (!(Array.isArray(t.urls) && t.urls.length) && !(Array.isArray(t.files) && t.files.length)) {
+        const saved = db.getTaskSource(t.id);
+        if (saved) {
+          extra = {
+            ...t,
+            urls: strList(saved.config && saved.config.urls),
+            files: strList(saved.config && saved.config.files),
+          };
+        }
+      }
+      return {
+        ...extra,
+        items: t.items || [],
+        logs: [],
+        canPause: false,
+        canResume: canResumeTask(t.type, t.status, t.id),
+      };
+    });
   return [...live, ...hist].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 

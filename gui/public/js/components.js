@@ -36,6 +36,19 @@ function statsHtml(t) {
   return parts.map((x) => `<span>${x}</span>`).join('');
 }
 
+// The original request the card was created from: message link(s) first, then
+// any export-JSON files. Links open the web preview in a new tab.
+function sourceHtml(t) {
+  const urls = (Array.isArray(t.urls) ? t.urls : []).filter(Boolean);
+  const files = (Array.isArray(t.files) ? t.files : []).filter(Boolean);
+  if (!urls.length && !files.length) return '';
+  const links = urls.map((u) =>
+    `<a class="task-source-link" href="${esc(u)}" target="_blank" rel="noopener" title="${esc(u)}">${esc(u)}</a>`);
+  const fileTags = files.map((f) =>
+    `<span class="task-source-file" title="${esc(f)}">📄 ${esc(f)}</span>`);
+  return `<div class="task-source">${[...links, ...fileTags].join(' ')}</div>`;
+}
+
 export function taskCard(t, { showLogs } = {}) {
   const meta = TYPE_META[t.type] || { ico: '•', name: t.type };
   const c = t.counters || {};
@@ -62,6 +75,7 @@ export function taskCard(t, { showLogs } = {}) {
         <button class="btn sm" data-act="toggle-args">命令</button>
       </div>
     </div>
+    ${sourceHtml(t)}
     <div class="task-args">$ tdl ${esc(t.args || '')}</div>
     ${t.error ? `<div class="task-sub" style="color:var(--fail);margin-top:8px">⚠ ${esc(t.error)}</div>` : ''}
     <div class="task-stats">${statsHtml(t)}</div>
