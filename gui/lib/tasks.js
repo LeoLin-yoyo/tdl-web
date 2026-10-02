@@ -337,10 +337,21 @@ function serveArgsFor(t, cfg) {
   return TYPES[t.type].build(t, cfg);
 }
 
+// Network-family failures that a fresh transfer round can plausibly survive:
+// stalled connections, resets, early disconnects, serve-side 5xx/429. Structural
+// errors (Range unsupported, disk full, bad link) are deliberately excluded so
+// they fail fast instead of burning through the retry budget.
+function isTransientTransferError(e) {
+  return e.name === 'IncompleteError' || e.name === 'StallError' ||
+    /fetch failed|ECONN|ETIMEDOUT|socket hang up|UND_ERR|HTTP 5\d\d|HTTP 429|连接提前断开|无数据|假死|timeout/i
+      .test(String(e.message || e));
+}
+
 async function runDownloadTask(t, cfg) {
   const baseArgs = serveArgsFor(t, cfg);
   // a stable port per task keeps concurrent GUI instances from colliding
   const port = 18900 + (parseInt(t.id.slice(0, 4), 16) % 90);
+  const base = `http://127.0.0.1:${port}`;
   t.displayArgs = [...baseArgs, '--serve'].map((a) => (/[\s"]/.test(a) ? JSON.stringify(a) : a)).join(' ');
 
   return tdl.enqueue(`task:${t.type}:${t.id}`, async () => {
@@ -349,132 +360,214 @@ async function runDownloadTask(t, cfg) {
     pushLog(t, `$ tdl ${t.displayArgs}`);
     emit('task', snapshot(t));
 
-    // Bolt allows a single writer: if a previous tdl just exited, its lock can
-    // linger for a moment. Retry startup a few times on that specific error
-    // instead of failing the task outright.
-    let session = null;
-    let base = `http://127.0.0.1:${port}`;
-    let ready = false;
-    let dbLocked = false;
-    for (let attempt = 0; attempt < 5 && !ready; attempt++) {
-      if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
-
-      const h = tdl.startServe(baseArgs, port);
-      t.handle = h;
-      let hitDbLock = false;
-      if (h.onLine) {
-        h.onLine((line) => {
-          if (/database is used by another process/i.test(line)) hitDbLock = true;
-          pushLog(t, `[serve] ${line}`);
-        });
-      }
-      session = h;
-
-      for (let i = 0; i < 20 && !ready; i++) {
-        if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
-        if (hitDbLock) break; // no point waiting; restart below
-        try {
-          const r = await fetch(`${base}/`);
-          if (r.status === 200) { r.body?.cancel?.(); ready = true; break; }
-        } catch { /* not up yet */ }
-        await new Promise((r) => setTimeout(r, 700));
-      }
-
-      if (!ready) {
-        dbLocked = hitDbLock;
-        try { h.kill(); } catch { /* gone */ }
-        t.handle = null;
-        if (!hitDbLock) break; // a different failure: stop retrying
-        pushLog(t, `tdl 数据库被占用，${1.5}s 后重试启动…`);
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    }
-    if (!ready) {
-      throw new Error(dbLocked
-        ? 'tdl 数据库被其他进程占用，无法启动下载（请关闭其他 tdl 后重试）'
-        : '等待 tdl --serve 就绪超时');
-    }
-    t.handle = session;
-
     // pause = abort the in-flight HTTP transfer (the .part stays on disk)
     const ac = new AbortController();
     t.abortDownload = () => ac.abort();
 
-    try {
-      await serveDl.downloadAll({
-        base,
-        dir: t.dir,
-        signal: ac.signal,
-        connections: Number(t.config.connections) || config.load().connections,
-        fileConcurrency: Number(t.config.fileConcurrency) || config.load().fileConcurrency,
-        onFile: (info) => {
-          const it = ensureItem(t, info.name);
-          Object.assign(it, {
-            label: info.name, path: info.path, total: info.size, state: info.state,
-            // keep the offset we already have so a resumed task does not look
-            // like it restarted from zero
-            done: it.done || 0, pct: it.pct || 0, updatedAt: Date.now(),
+    // Bolt allows a single writer: if a previous tdl just exited, its lock can
+    // linger for a moment. Retry startup a few times on that specific error
+    // instead of failing the task outright.
+    const startServeSession = async () => {
+      let ready = false;
+      let dbLocked = false;
+      let session = null;
+      // 10 attempts x 2s: the usual lock holder is the startup login-detect
+      // (`tdl chat ls`), which can run slow on a degraded Telegram route
+      for (let attempt = 0; attempt < 10 && !ready; attempt++) {
+        if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
+
+        const h = tdl.startServe(baseArgs, port);
+        t.handle = h;
+        let hitDbLock = false;
+        if (h.onLine) {
+          h.onLine((line) => {
+            if (/database is used by another process/i.test(line)) hitDbLock = true;
+            pushLog(t, `[serve] ${line}`);
           });
-          t.dirty = true;
-        },
-        onProgress: (done, total, info) => {
-          const it = ensureItem(t, info.name);
-          // speed = bytes gained since the previous sample / elapsed time.
-          // Smoothed over ~1s so the number stays readable.
-          const now = Date.now();
-          if (it.speedAt && now > it.speedAt) {
-            const dt = now - it.speedAt;
-            const db = done - (it.speedBytes || 0);
-            if (dt >= 900 && db >= 0) {
-              const inst = db / (dt / 1000);
-              // exponential smoothing keeps brief stalls from flickering the value
-              it.speedBps = it.speedBps ? Math.round(it.speedBps * 0.4 + inst * 0.6) : Math.round(inst);
+        }
+        session = h;
+
+        for (let i = 0; i < 20 && !ready; i++) {
+          if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
+          if (hitDbLock) break; // no point waiting; restart below
+          try {
+            const r = await fetch(`${base}/`);
+            if (r.status === 200) { r.body?.cancel?.(); ready = true; break; }
+          } catch { /* not up yet */ }
+          await new Promise((r) => setTimeout(r, 700));
+        }
+
+        if (!ready) {
+          dbLocked = hitDbLock;
+          try { h.kill(); } catch { /* gone */ }
+          t.handle = null;
+          if (!hitDbLock) break; // a different failure: stop retrying
+          pushLog(t, `tdl 数据库被占用，2s 后重试启动…`);
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+      if (!ready) {
+        throw new Error(dbLocked
+          ? 'tdl 数据库被其他进程占用，无法启动下载（请关闭其他 tdl 后重试）'
+          : '等待 tdl --serve 就绪超时');
+      }
+      return session;
+    };
+
+    // tdl --serve can die mid-transfer (an unstable proxy node / Telegram route
+    // takes the whole process down). Restart it and continue from the sidecar
+    // offsets instead of failing the whole task. The same outer loop also
+    // re-runs the transfer itself when a degraded route exhausts the per-block
+    // retries — every round resumes from the sidecar, so nothing is refetched.
+    const MAX_SERVE_RESTARTS = 5;
+    const MAX_TRANSFER_RETRIES = 10;
+    let restarts = 0;
+    let transferRetries = 0;
+    let outcome = null; // { status, error? }
+
+    while (outcome === null) {
+      // On a fully dead route the serve process cannot even resolve the link,
+      // so startup itself times out. Ride it out with the same retry budget as
+      // the transfer rounds instead of failing the task.
+      let session;
+      try {
+        session = await startServeSession();
+      } catch (e) {
+        if (t.cancelRequested || t.pauseRequested || e.name === 'AbortError') throw e;
+        if (transferRetries < MAX_TRANSFER_RETRIES) {
+          transferRetries += 1;
+          pushLog(t, `tdl --serve 启动失败（${String(e.message || e).slice(0, 80)}），15s 后自动重试（第 ${transferRetries}/${MAX_TRANSFER_RETRIES} 次）…`);
+          await new Promise((r) => setTimeout(r, 15000));
+          continue;
+        }
+        outcome = {
+          status: 'failed',
+          error: `${String(e.message || e)}。线路可能持续不可用，请检查代理节点后点「继续」；进度已保存在 .part 文件中。`,
+        };
+        break;
+      }
+      let serveExitCode = null;
+      session.exit.then(({ exitCode }) => { serveExitCode = exitCode; }).catch(() => {});
+      // progress made by THIS round: a round that moved real bytes should not
+      // consume the no-progress retry budget
+      const bytesAtRoundStart = snapshot(t).counters.doneBytes || 0;
+
+      try {
+        await serveDl.downloadAll({
+          base,
+          dir: t.dir,
+          signal: ac.signal,
+          connections: Number(t.config.connections) || config.load().connections,
+          fileConcurrency: Number(t.config.fileConcurrency) || config.load().fileConcurrency,
+          onFile: (info) => {
+            const it = ensureItem(t, info.name);
+            Object.assign(it, {
+              label: info.name, path: info.path, total: info.size, state: info.state,
+              // keep the offset we already have so a resumed task does not look
+              // like it restarted from zero
+              done: it.done || 0, pct: it.pct || 0, updatedAt: Date.now(),
+            });
+            t.dirty = true;
+          },
+          onProgress: (done, total, info) => {
+            const it = ensureItem(t, info.name);
+            // speed = bytes gained since the previous sample / elapsed time.
+            // Smoothed over ~1s so the number stays readable.
+            const now = Date.now();
+            if (it.speedAt && now > it.speedAt) {
+              const dt = now - it.speedAt;
+              const db = done - (it.speedBytes || 0);
+              if (dt >= 900 && db >= 0) {
+                const inst = db / (dt / 1000);
+                // exponential smoothing keeps brief stalls from flickering the value
+                it.speedBps = it.speedBps ? Math.round(it.speedBps * 0.4 + inst * 0.6) : Math.round(inst);
+                it.speedAt = now;
+                it.speedBytes = done;
+              }
+            } else {
               it.speedAt = now;
               it.speedBytes = done;
             }
-          } else {
-            it.speedAt = now;
-            it.speedBytes = done;
-          }
-          Object.assign(it, {
-            label: info.name, path: info.path, done, total,
-            pct: total ? Math.round((done / total) * 100) : 0,
-            speed: it.speedBps ? fmtBps(it.speedBps) : '',
-            state: 'active', updatedAt: now,
-          });
-          t.dirty = true;
-        },
-      });
+            Object.assign(it, {
+              label: info.name, path: info.path, done, total,
+              pct: total ? Math.round((done / total) * 100) : 0,
+              speed: it.speedBps ? fmtBps(it.speedBps) : '',
+              state: 'active', updatedAt: now,
+            });
+            t.dirty = true;
+          },
+        });
 
-      t.exitCode = 0;
-      if (t.cancelRequested) t.status = 'canceled';
-      else if (t.pauseRequested) t.status = 'paused';
-      else {
-        const c = snapshot(t).counters;
-        if (c.itemsKnown === 0) {
-          t.status = 'nomatch';
-          t.error = '没有任何文件被处理：链接里没有可下载的媒体，或扩展名过滤把所有文件都排除了。';
+        t.exitCode = 0;
+        if (t.cancelRequested) outcome = { status: 'canceled' };
+        else if (t.pauseRequested) outcome = { status: 'paused' };
+        else {
+          const c = snapshot(t).counters;
+          if (c.itemsKnown === 0) {
+            outcome = {
+              status: 'nomatch',
+              error: '没有任何文件被处理：链接里没有可下载的媒体，或扩展名过滤把所有文件都排除了。',
+            };
+          } else {
+            outcome = { status: 'success' };
+          }
+        }
+      } catch (e) {
+        t.exitCode = 1;
+        if (t.cancelRequested) {
+          outcome = { status: 'canceled' };
+        } else if (t.pauseRequested || e.name === 'AbortError') {
+          outcome = { status: 'paused' };
+          pushLog(t, '已暂停（已下载部分保留在 .part 文件中，继续时从断点接续）');
+        } else if (e.name === 'ServeDeadError') {
+          // give the pty a moment to flush tdl's dying output into the log,
+          // then tear the session down and decide whether to restart
+          await new Promise((r) => setTimeout(r, 1500));
+          try { session.kill(); } catch { /* gone */ }
+          t.handle = null;
+          if (restarts < MAX_SERVE_RESTARTS) {
+            restarts += 1;
+            pushLog(t, `tdl --serve 进程中途退出（退出码 ${serveExitCode ?? '未知'}），自动重启并从断点续传（第 ${restarts}/${MAX_SERVE_RESTARTS} 次）…`);
+            continue;
+          }
+          outcome = {
+            status: 'failed',
+            error: `tdl --serve 连续退出（已自动重启 ${MAX_SERVE_RESTARTS} 次）。常见原因是代理节点到 Telegram 的线路不稳定，请检查代理后重试；进度已保存在 .part 文件中。`,
+          };
+        } else if (isTransientTransferError(e)) {
+          const gained = (snapshot(t).counters.doneBytes || 0) - bytesAtRoundStart;
+          const madeProgress = gained > 1048576; // a round that moved real bytes buys another one
+          if (!madeProgress) transferRetries += 1;
+          try { session.kill(); } catch { /* gone */ }
+          t.handle = null;
+          if (!madeProgress && transferRetries > MAX_TRANSFER_RETRIES) {
+            outcome = {
+              status: 'failed',
+              error: `代理线路持续不稳（连续 ${MAX_TRANSFER_RETRIES} 轮传输均无进展）。请检查代理节点到 Telegram 的线路后点「继续」，进度已保存在 .part 文件中。`,
+            };
+          } else {
+            pushLog(t, madeProgress
+              ? `线路不稳，本轮仍推进了约 ${Math.round(gained / 1048576)}MB，10s 后自动从断点续传…`
+              : `线路不稳导致传输中断（${String(e.message || e).slice(0, 60)}），10s 后自动重试（无进展第 ${transferRetries}/${MAX_TRANSFER_RETRIES} 次）…`);
+            await new Promise((r) => setTimeout(r, 10000));
+            continue;
+          }
         } else {
-          t.status = 'success';
+          // unexpected failure: flush any late tdl output into the log first
+          await new Promise((r) => setTimeout(r, 800));
+          outcome = { status: 'failed', error: t.error || String(e.message || e) };
         }
       }
-    } catch (e) {
-      t.exitCode = 1;
-      if (t.cancelRequested) {
-        t.status = 'canceled';
-      } else if (t.pauseRequested || e.name === 'AbortError') {
-        t.status = 'paused';
-        pushLog(t, '已暂停（已下载部分保留在 .part 文件中，继续时从断点接续）');
-      } else {
-        t.status = 'failed';
-        t.error = t.error || String(e.message || e);
-      }
-    } finally {
-      t.abortDownload = null;
-      try { session.kill(); } catch { /* already gone */ }
+
+      // non-restart paths: tear the session down
+      try { session.kill(); } catch { /* gone */ }
       t.handle = null;
     }
 
+    if (outcome.error) t.error = outcome.error;
+    t.status = outcome.status;
+
+    t.abortDownload = null;
     t.finishedAt = Date.now();
     pushLog(t, `→ ${t.status}`);
     emit('task', snapshot(t, { withLogs: true }));

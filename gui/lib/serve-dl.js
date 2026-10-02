@@ -20,6 +20,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomInt } = require('node:crypto');
 
 const LOOPBACK = ['127.0.0.1', 'localhost', '::1'];
 
@@ -35,6 +36,60 @@ const MAX_CONNECTIONS = 64;
 // How many files are transferred at the same time. Multiple URLs should all
 // start progressing instead of queueing behind one large file.
 const DEFAULT_FILE_CONCURRENCY = 3;
+
+// Retries per 8MiB block. Telegram/proxy links flap: connections get reset in
+// batches mid-transfer, so a single dropped request must never kill the task.
+// A retry continues from the block's partial offset, so nothing is refetched.
+const BLOCK_RETRIES = 4;
+// A connection that delivers no bytes for this long is considered dead (a
+// stalled route looks alive at the TCP level but never errors out on its own;
+// undici's own body timeout is 300s — far too patient).
+const STALL_TIMEOUT = 20_000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// jittered backoff, crypto-random only to keep security scanners quiet
+const jitter = (base, spread) => base + randomInt(0, spread);
+
+// undici fetch failures only say "fetch failed"; the real reason (ECONNRESET,
+// ETIMEDOUT, ...) sits in .cause. Surface it so task logs are diagnosable.
+function describeFetchError(e) {
+  const cause = e && e.cause;
+  const detail = (cause && (cause.code || cause.message)) || '';
+  const msg = String((e && e.message) || e);
+  if (detail && !msg.includes(detail)) return `${msg} (${detail})`;
+  return msg;
+}
+
+// True when the local serve process still answers on its index page.
+function isServeAlive(base) {
+  return (async () => {
+    try {
+      assertLoopback(base);
+      const res = await fetch(base + '/', { signal: AbortSignal.timeout(3000) });
+      res.body?.cancel?.();
+      return res.status < 500;
+    } catch { return false; }
+  })();
+}
+
+// fetch + bounded retry that also detects a dead serve process. Used for the
+// small requests (index, HEAD) where a block-style retry loop is overkill.
+async function fetchWithRetry(url, opts = {}, tries = 3) {
+  let lastErr = null;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      return await fetch(url, opts);
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      lastErr = e;
+      if (i < tries) await sleep(jitter(400, 400));
+    }
+  }
+  if (!(await isServeAlive(new URL(url).origin))) {
+    throw Object.assign(new Error('tdl --serve 进程已退出'), { name: 'ServeDeadError' });
+  }
+  throw new Error(describeFetchError(lastErr));
+}
 
 // Reject anything that is not plain http on a loopback address. The base URL is
 // always built by our own code from the local serve port, so this is a second
@@ -131,6 +186,7 @@ async function fetchFile({ url, dest, total, connections, onProgress, signal }) 
 
   const fd = fs.openSync(partFile, 'r+');
   const inFlight = new Map(); // block index -> bytes written in this session
+  let serveDead = false; // shared: one worker proving serve is gone stops the others
   const report = () => {
     if (!onProgress) return;
     // bytes from finished blocks + bytes carried over + bytes fetched now
@@ -145,46 +201,93 @@ async function fetchFile({ url, dest, total, connections, onProgress, signal }) 
     if (signal && signal.aborted) throw abortErr();
     const blockStart = idx * BLOCK;
     const blockEnd = Math.min(blockStart + BLOCK, total) - 1;
-    // resume inside the block when a previous session stopped partway
-    const already = Math.min(partial.get(idx) || 0, blockEnd - blockStart + 1);
-    const start = blockStart + already;
+    const blockLen = blockEnd - blockStart + 1;
 
-    if (start > blockEnd) { done.add(idx); partial.delete(idx); return; }
-
-    const init = signal ? { signal } : {};
-    const res = await fetch(url, { headers: { Range: `bytes=${start}-${blockEnd}` }, ...init });
-    if (res.status === 200 && blockCount > 1) {
-      // server ignored Range: writing this would corrupt the block layout
-      res.body?.cancel?.();
-      throw new Error('服务器未支持 Range 请求');
-    }
-    if (res.status !== 206 && res.status !== 200) {
-      res.body?.cancel?.();
-      throw new Error(`HTTP ${res.status} for range ${start}-${blockEnd}`);
-    }
-
-    let written = already;
-    for await (const buf of res.body) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= BLOCK_RETRIES; attempt++) {
+      // another worker already proved the serve process is gone: no point trying
+      if (serveDead) throw Object.assign(new Error('tdl --serve 进程已退出'), { name: 'ServeDeadError' });
       if (signal && signal.aborted) throw abortErr();
-      const chunk = Buffer.from(buf);
-      fs.writeSync(fd, chunk, 0, chunk.length, blockStart + written);
-      written += chunk.length;
-      inFlight.set(idx, written - already);
-      partial.set(idx, written);
-      report();
+
+      // resume inside the block when a previous attempt stopped partway
+      const already = Math.min(partial.get(idx) || 0, blockLen);
+      const start = blockStart + already;
+      if (start > blockEnd) { done.add(idx); partial.delete(idx); return; }
+
+      try {
+        // per-attempt abort so a stalled connection can be cut without
+        // touching the shared pause signal
+        const stall = new AbortController();
+        let lastByte = Date.now();
+        const watchdog = setInterval(() => {
+          if (Date.now() - lastByte > STALL_TIMEOUT) {
+            stall.abort(Object.assign(new Error(`连接 ${Math.round(STALL_TIMEOUT / 1000)} 秒无数据，判定假死`), { name: 'StallError' }));
+          }
+        }, 2000);
+        let res;
+        try {
+          const sig = signal ? AbortSignal.any([signal, stall.signal]) : stall.signal;
+          res = await fetch(url, { headers: { Range: `bytes=${start}-${blockEnd}` }, signal: sig });
+          if (res.status === 200 && blockCount > 1) {
+            // server ignored Range: writing this would corrupt the block layout
+            res.body?.cancel?.();
+            throw new Error('服务器未支持 Range 请求');
+          }
+          if (res.status !== 206 && res.status !== 200) {
+            // the response body carries tdl's own error text (dial timeouts,
+            // FLOOD_WAIT, ...) — surface it instead of a bare HTTP status
+            const text = await res.text().catch(() => '');
+            throw new Error(`HTTP ${res.status} for range ${start}-${blockEnd}${text ? `: ${text.trim().slice(0, 200)}` : ''}`);
+          }
+
+          let written = already;
+          for await (const buf of res.body) {
+            if (signal && signal.aborted) throw abortErr();
+            const chunk = Buffer.from(buf);
+            fs.writeSync(fd, chunk, 0, chunk.length, blockStart + written);
+            written += chunk.length;
+            lastByte = Date.now();
+            inFlight.set(idx, written - already);
+            partial.set(idx, written);
+            report();
+          }
+
+          inFlight.delete(idx);
+          if (written >= blockLen) {
+            // block complete
+            done.add(idx);
+            partial.delete(idx);
+            saveMeta();
+            report();
+            return;
+          }
+          // connection ended early; remember how far we got and retry from there
+          partial.set(idx, written);
+          saveMeta();
+          lastErr = new Error(`连接提前断开（已取 ${written - already}/${blockLen} 字节）`);
+        } finally {
+          clearInterval(watchdog);
+        }
+      } catch (e) {
+        inFlight.delete(idx);
+        if (e.name === 'AbortError') throw e;
+        lastErr = e;
+      }
+      if (attempt < BLOCK_RETRIES) {
+        // jittered backoff so the whole pool does not reconnect in lockstep
+        await sleep(jitter(400 * attempt, 600));
+      }
     }
 
-    inFlight.delete(idx);
-    if (written >= blockEnd - blockStart + 1) {
-      // block complete
-      done.add(idx);
-      partial.delete(idx);
-    } else {
-      // connection ended early; remember how far we got for the next attempt
-      partial.set(idx, written);
+    // every attempt failed: is the serve process itself gone?
+    if (!(await isServeAlive(new URL(url).origin))) {
+      serveDead = true;
+      throw Object.assign(new Error('tdl --serve 进程已退出'), { name: 'ServeDeadError' });
     }
-    saveMeta();
-    report();
+    const finalErr = new Error(describeFetchError(lastErr || new Error('fetch failed')));
+    // keep the original error class (StallError, ...) so callers can classify
+    if (lastErr && lastErr.name && lastErr.name !== 'Error') finalErr.name = lastErr.name;
+    throw finalErr;
   };
 
   const pool = Math.max(1, Math.min(connections || DEFAULT_CONNECTIONS, MAX_CONNECTIONS));
@@ -240,7 +343,7 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections,
   assertLoopback(base);
   const abortErr = () => Object.assign(new Error('paused'), { name: 'AbortError' });
 
-  const indexRes = await fetch(`${base}/`);
+  const indexRes = await fetchWithRetry(`${base}/`);
   const items = parseIndex(await indexRes.text());
 
   fs.mkdirSync(dir, { recursive: true });
@@ -258,7 +361,7 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections,
     const item = items[idx];
     if (signal && signal.aborted) throw abortErr();
 
-    const head = await fetch(`${base}/${item}`, { method: 'HEAD' });
+    const head = await fetchWithRetry(`${base}/${item}`, { method: 'HEAD' });
     const total = Number(head.headers.get('content-length') || 0);
     if (!total) { results[idx] = null; return; }
 
@@ -301,5 +404,6 @@ async function downloadAll({ base, dir, onFile, onProgress, signal, connections,
 
 module.exports = {
   downloadAll, parseIndex, assertLoopback, filenameFrom,
-  fetchFile, BLOCK, DEFAULT_CONNECTIONS, MAX_CONNECTIONS, DEFAULT_FILE_CONCURRENCY,
+  fetchFile, isServeAlive, describeFetchError, fetchWithRetry,
+  BLOCK, BLOCK_RETRIES, DEFAULT_CONNECTIONS, MAX_CONNECTIONS, DEFAULT_FILE_CONCURRENCY,
 };
