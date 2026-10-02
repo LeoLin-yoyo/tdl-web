@@ -18,7 +18,7 @@ if exist "%BIN_DIR%\tdlw-stop.vbs" (
 )
 
 echo [2/3] Removing shortcut files...
-for %%F in (tdlw.vbs tdlw-stop.vbs tdlw.path) do (
+for %%F in (tdlw.vbs tblw.vbs tdlw-stop.vbs tdlw.path) do (
   if exist "%BIN_DIR%\%%F" (
     del /f /q "%BIN_DIR%\%%F" >nul && echo       removed %%F
   )

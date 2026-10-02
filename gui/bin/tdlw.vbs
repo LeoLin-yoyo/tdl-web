@@ -65,9 +65,6 @@ serverJs = fso.BuildPath(guiDir, "server.js")
 ' ---- 1. fast path: a server is already answering -------------------------
 If IsServerUp() Then
   OpenBrowser()
-  sh.Popup "tdl Web GUI is already running." & vbCrLf & _
-           "Opened the existing instance - no new process was started.", _
-           4, "tdlw", 64
   WScript.Quit 0
 End If
 
@@ -85,9 +82,6 @@ If Not acquired Then
   Else
     If WaitForServer(20) Then
       OpenBrowser()
-      sh.Popup "Another tdlw instance was starting up." & vbCrLf & _
-               "Reused it and opened the page - no new process was started.", _
-               4, "tdlw", 64
       WScript.Quit 0
     End If
     ' still nothing after waiting: treat the lock as leftover and take over

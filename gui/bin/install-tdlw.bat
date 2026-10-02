@@ -35,6 +35,8 @@ copy /y "%~dp0tdlw.vbs" "%TARGET%" >nul
 if errorlevel 1 (echo [ERROR] failed to copy tdlw.vbs & pause & exit /b 1)
 copy /y "%~dp0tdlw-stop.vbs" "%TARGET_STOP%" >nul
 if errorlevel 1 (echo [ERROR] failed to copy tdlw-stop.vbs & pause & exit /b 1)
+copy /y "%~dp0tblw.vbs" "%BIN_DIR%\tblw.vbs" >nul
+if errorlevel 1 (echo [ERROR] failed to copy tblw.vbs & pause & exit /b 1)
 
 rem record the GUI directory next to the launcher so tdlw.vbs can find server.js
 rem (nul redirect + <nul keeps the file free of a trailing newline)
@@ -72,6 +74,7 @@ echo.
 echo [OK] Installed.
 echo.
 echo   start : tdlw        (runs silently in background, opens the browser)
+echo          tblw          (alias, same command - both names work)
 echo   stop  : tdlw-stop   (stops the server and releases the tdl database lock)
 echo   log   : %GUI_DIR%\data\server.log
 echo   url   : http://127.0.0.1:8560
