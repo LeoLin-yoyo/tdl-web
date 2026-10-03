@@ -1,6 +1,7 @@
 import { boot } from './app.js';
 import './pages/dashboard.js';
 import './pages/tasks.js';
+import './pages/play.js';
 import './pages/login.js';
 import './pages/files.js';
 import './pages/settings.js';

@@ -926,4 +926,39 @@ setInterval(() => {
   }
 }, 500).unref();
 
-module.exports = { create, cancel, pause, resume, remove, get, publicList, snapshot, onEvent };
+// ---- hooks for the online-playback module (lib/stream.js) -------------------
+
+// The deterministic per-task serve port. Exported so the stream proxy can
+// reach a running download task's serve without touching task internals.
+function servePortFor(id) {
+  return 18900 + (parseInt(String(id).slice(0, 4), 16) % 90);
+}
+
+// Live serve sessions of running download tasks. The playback proxy uses them
+// for 边看边下: a running task over the same links is already pulling the file
+// into <name>.part, so its finished blocks can be read from disk instead of
+// being fetched a second time from Telegram.
+function listServeSessions() {
+  const out = [];
+  for (const t of tasks.values()) {
+    if (t.type === 'dl' && t.status === 'running' && t.handle) {
+      const port = servePortFor(t.id);
+      out.push({ id: t.id, port, base: `http://127.0.0.1:${port}`, dir: t.dir });
+    }
+  }
+  return out;
+}
+
+// True while ANY tdl process is alive (serve sessions hold the bolt lock for
+// their whole lifetime; a queued task has not spawned anything yet).
+function hasRunningServe() {
+  for (const t of tasks.values()) {
+    if (t.handle) return true;
+  }
+  return false;
+}
+
+module.exports = {
+  create, cancel, pause, resume, remove, get, publicList, snapshot, onEvent,
+  buildDlArgs, servePortFor, listServeSessions, hasRunningServe,
+};

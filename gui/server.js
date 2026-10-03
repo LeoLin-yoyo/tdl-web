@@ -13,6 +13,7 @@ const chats = require('./lib/chats');
 const files = require('./lib/files');
 const desktop = require('./lib/desktop');
 const db = require('./lib/db');
+const stream = require('./lib/stream');
 
 // ---- resolve tdl.exe and make it resolvable by bare name ------------------
 const tdlPath = config.locateTdl();
@@ -182,6 +183,24 @@ async function api(req, res, pathname, searchParams) {
     return t ? sendJson(res, 200, { task: t }) : sendJson(res, 404, { error: '任务不存在' });
   }
   if (method === 'DELETE' && m) return sendJson(res, 200, tasks.remove(m[1]));
+
+  // ---- online playback (lib/stream.js) ----
+  if (method === 'POST' && p === '/api/stream/preview') {
+    const body = await readBody(req);
+    const urls = Array.isArray(body.urls) ? body.urls : String(body.urls || '').split(/\r?\n/);
+    return sendJson(res, 200, await stream.preview(urls));
+  }
+  if (method === 'GET' && p === '/api/stream/state') {
+    return sendJson(res, 200, stream.state());
+  }
+  if (method === 'POST' && p === '/api/stream/stop') {
+    const body = await readBody(req);
+    return sendJson(res, 200, stream.stop(body.sid || ''));
+  }
+  m = p.match(/^\/api\/stream\/([0-9a-f]+)\/(\d+)$/);
+  if (m && (method === 'GET' || method === 'HEAD')) {
+    return stream.handlePlay(req, res, m[1], m[2]);
+  }
 
   if (method === 'GET' && p === '/api/login') {
     return sendJson(res, 200, login.publicState());

@@ -288,3 +288,22 @@ details.adv .adv-body { padding-top: 10px; }
   #nav a { justify-content: center; padding: 10px 8px; }
   #view { padding: 16px 14px 60px; }
 }
+
+/* ---- 在线播放页 ---- */
+.file-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid transparent;
+}
+.file-row:hover { background: var(--panel-2); }
+.file-row.active { background: var(--panel-2); border-color: var(--border); }
+.file-row .file-name {
+  flex: 1; min-width: 0; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-row .file-meta { display: flex; align-items: center; gap: 8px; flex: none; }
+.tag {
+  font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--border-soft);
+}
+.tag.ok { color: var(--accent); border-color: var(--accent); }
+.tag.warn { color: #e0a24a; border-color: #e0a24a; }

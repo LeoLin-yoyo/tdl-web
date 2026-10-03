@@ -48,6 +48,12 @@ const DEFAULTS = {
   // How many files download at once. >1 keeps every pasted link progressing
   // instead of queueing behind a single large file.
   fileConcurrency: 3,
+  // Online playback (lib/stream.js). A single serve connection is too slow for
+  // real-time video, so playback is fed from a parallel prefetch pool.
+  streamConnections: 16, // prefetch connections while playing (speed: 16 ≈ 2.8 MB/s)
+  streamWindowMB: 96,    // keep this much fetched ahead of the playhead
+  streamCacheMB: 256,    // in-memory block cache cap (seek-back friendly)
+  streamIdleMin: 10,     // close the playback session after this many idle minutes
 };
 
 let cache = null;
@@ -91,6 +97,15 @@ function save(patch) {
   for (const k of ['threads', 'limit', 'delay', 'reconnectTimeout', 'connections', 'fileConcurrency']) {
     next[k] = Number(next[k]) >= 0 ? Number(next[k]) : DEFAULTS[k];
   }
+  // playback knobs are bounded so a typo cannot exhaust memory or sockets
+  const clamp = (v, dflt, lo, hi) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+  };
+  next.streamConnections = clamp(next.streamConnections, DEFAULTS.streamConnections, 1, 64);
+  next.streamWindowMB = clamp(next.streamWindowMB, DEFAULTS.streamWindowMB, 8, 1024);
+  next.streamCacheMB = clamp(next.streamCacheMB, DEFAULTS.streamCacheMB, 32, 4096);
+  next.streamIdleMin = clamp(next.streamIdleMin, DEFAULTS.streamIdleMin, 1, 240);
   for (const k of ['group', 'skipSame', 'rewriteExt', 'takeout', 'desc']) {
     next[k] = next[k] === true || next[k] === 'true';
   }

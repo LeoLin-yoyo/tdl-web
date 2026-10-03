@@ -72,6 +72,28 @@ async function render(view) {
     </div>
 
     <div class="card">
+      <h2>在线播放</h2>
+      <div class="hint muted small" style="margin-bottom:12px">
+        播放由本地多连接预取池供流（单连接只有 ~0.1 MB/s，跑不动视频）。窗口越大起播越稳，缓存越大拖回越快。
+      </div>
+      <div class="grid c2">
+        <div class="field"><label>播放预取连接数</label>
+          <input type="number" id="s-streamconn" value="${cfg.streamConnections ?? 16}" min="1" max="64">
+          <span class="hint">实测 16 连接 ≈ 2.8 MB/s，足够 1080p 实时播放</span></div>
+        <div class="field"><label>预取窗口（MB）</label>
+          <input type="number" id="s-streamwin" value="${cfg.streamWindowMB ?? 96}" min="8" max="1024">
+          <span class="hint">保持播放头前方这么多数据已取回</span></div>
+        <div class="field"><label>内存缓存上限（MB）</label>
+          <input type="number" id="s-streamcache" value="${cfg.streamCacheMB ?? 256}" min="32" max="4096">
+          <span class="hint">已取块驻留内存的总量，拖回进度条时秒响应</span></div>
+        <div class="field"><label>空闲自动关闭（分钟）</label>
+          <input type="number" id="s-streamidle" value="${cfg.streamIdleMin ?? 10}" min="1" max="240">
+          <span class="hint">无播放请求达到该时长后关闭播放会话并释放资源</span></div>
+      </div>
+      <button class="btn primary" id="s-save-stream">保存在线播放设置</button>
+    </div>
+
+    <div class="card">
       <h2>关于</h2>
       <div class="muted small" style="line-height:2.1">
         tdl 版本 <b style="color:var(--text)">${esc(store.version || '…')}</b>（CLI 单文件，GUI 不修改它）<br>
@@ -106,6 +128,13 @@ async function render(view) {
     connections: Number(view.querySelector('#s-connections').value) || 48,
     fileConcurrency: Number(view.querySelector('#s-fileconc').value) || 3,
   }, view.querySelector('#s-save'));
+
+  view.querySelector('#s-save-stream').onclick = () => saveConfig({
+    streamConnections: Number(view.querySelector('#s-streamconn').value) || 16,
+    streamWindowMB: Number(view.querySelector('#s-streamwin').value) || 96,
+    streamCacheMB: Number(view.querySelector('#s-streamcache').value) || 256,
+    streamIdleMin: Number(view.querySelector('#s-streamidle').value) || 10,
+  }, view.querySelector('#s-save-stream'));
 
   view.querySelector('#s-save-dl').onclick = () => saveConfig({
     dir: view.querySelector('#s-dir').value.trim(),
