@@ -379,6 +379,16 @@ async function runDownloadTask(t, cfg) {
     pushLog(t, `$ tdl ${t.displayArgs}`);
     emit('task', snapshot(t));
 
+    // stopped while queued (behind another task): settle without starting tdl
+    if (t.cancelRequested || t.pauseRequested) {
+      t.status = t.pauseRequested ? 'paused' : 'canceled';
+      t.finishedAt = Date.now();
+      pushLog(t, `→ ${t.status}`);
+      emit('task', snapshot(t, { withLogs: true }));
+      persistFinished(t);
+      return;
+    }
+
     // pause = abort the in-flight HTTP transfer (the .part stays on disk)
     const ac = new AbortController();
     t.abortDownload = () => ac.abort();
@@ -386,6 +396,8 @@ async function runDownloadTask(t, cfg) {
     // Bolt allows a single writer: if a previous tdl just exited, its lock can
     // linger for a moment. Retry startup a few times on that specific error
     // instead of failing the task outright.
+    const stopErr = () => Object.assign(new Error('stopped'), { name: 'AbortError' });
+
     const startServeSession = async () => {
       let ready = false;
       let dbLocked = false;
@@ -393,7 +405,7 @@ async function runDownloadTask(t, cfg) {
       // 10 attempts x 2s: the usual lock holder is the startup login-detect
       // (`tdl chat ls`), which can run slow on a degraded Telegram route
       for (let attempt = 0; attempt < 10 && !ready; attempt++) {
-        if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
+        if (t.cancelRequested || t.pauseRequested) throw stopErr();
 
         const h = tdl.startServe(baseArgs, port);
         t.handle = h;
@@ -406,20 +418,29 @@ async function runDownloadTask(t, cfg) {
         }
         session = h;
 
-        for (let i = 0; i < 20 && !ready; i++) {
-          if (t.cancelRequested || t.pauseRequested) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
-          if (hitDbLock) break; // no point waiting; restart below
-          try {
-            const r = await fetch(`${base}/`);
-            if (r.status === 200) { r.body?.cancel?.(); ready = true; break; }
-          } catch { /* not up yet */ }
-          await new Promise((r) => setTimeout(r, 700));
+        try {
+          for (let i = 0; i < 20 && !ready; i++) {
+            if (t.cancelRequested || t.pauseRequested) throw stopErr();
+            if (hitDbLock) break; // no point waiting; restart below
+            try {
+              const r = await fetch(`${base}/`);
+              if (r.status === 200) { r.body?.cancel?.(); ready = true; break; }
+            } catch { /* not up yet */ }
+            await new Promise((r) => setTimeout(r, 700));
+          }
+        } finally {
+          // A pause/cancel or timeout while waiting for readiness must never
+          // leave the just-spawned serve running: it would keep holding tdl's
+          // single-writer bolt DB lock, and every later resume/task would fail
+          // with "database is used by another process" until it is killed by hand.
+          if (!ready) {
+            try { h.kill(); } catch { /* gone */ }
+            if (t.handle === h) t.handle = null;
+          }
         }
 
         if (!ready) {
           dbLocked = hitDbLock;
-          try { h.kill(); } catch { /* gone */ }
-          t.handle = null;
           if (!hitDbLock) break; // a different failure: stop retrying
           pushLog(t, `tdl 数据库被占用，2s 后重试启动…`);
           await new Promise((r) => setTimeout(r, 2000));
@@ -452,7 +473,18 @@ async function runDownloadTask(t, cfg) {
       try {
         session = await startServeSession();
       } catch (e) {
-        if (t.cancelRequested || t.pauseRequested || e.name === 'AbortError') throw e;
+        // A stop requested while the serve was starting (or between rounds)
+        // settles here: recording the deliberate pause/cancel keeps the task
+        // resumable, instead of letting the error mark it as failed.
+        if (t.cancelRequested) {
+          outcome = { status: 'canceled' };
+          break;
+        }
+        if (t.pauseRequested || e.name === 'AbortError') {
+          pushLog(t, '已暂停（serve 未完成启动，无进度损失）');
+          outcome = { status: 'paused' };
+          break;
+        }
         if (transferRetries < MAX_TRANSFER_RETRIES) {
           transferRetries += 1;
           pushLog(t, `tdl --serve 启动失败（${String(e.message || e).slice(0, 80)}），15s 后自动重试（第 ${transferRetries}/${MAX_TRANSFER_RETRIES} 次）…`);
@@ -611,6 +643,17 @@ async function runTask(t) {
     pushLog(t, `$ tdl ${t.displayArgs}`);
     emit('task', snapshot(t));
 
+    // stopped while queued (behind another task): settle without starting tdl
+    if (t.cancelRequested || t.pauseRequested) {
+      t.status = t.pauseRequested ? 'paused' : 'canceled';
+      t.finishedAt = Date.now();
+      pushLog(t, `→ ${t.status}`);
+      emit('task', snapshot(t, { withLogs: true }));
+      persistFinished(t);
+      resolve();
+      return;
+    }
+
     const h = tdl.startTdl(args, { cwd: path.dirname(tdl.TDL_PATH) });
     t.handle = h;
     h.onLine((line) => handleLine(t, line));
@@ -715,10 +758,12 @@ function createOne(type, rawConfig) {
   tasks.set(t.id, t);
   emit('task', snapshot(t));
   runTask(t).catch((e) => {
-    t.status = 'failed';
-    t.error = String(e && e.message || e);
+    // last resort: a deliberate stop must not end up labelled as a failure
+    t.status = t.cancelRequested ? 'canceled' : t.pauseRequested ? 'paused' : 'failed';
+    if (t.status === 'failed') t.error = String(e && e.message || e);
     t.finishedAt = Date.now();
     emit('task', snapshot(t, { withLogs: true }));
+    persistFinished(t);
   });
   return { task: snapshot(t) };
 }
@@ -778,6 +823,7 @@ async function pause(id) {
   if (t.status === 'queued') {
     // never started: just take it out of the queue
     t.cancelRequested = true;
+    t.pauseRequested = true;
     t.status = 'paused';
     t.finishedAt = Date.now();
     emit('task', snapshot(t));
@@ -839,10 +885,12 @@ function resume(id) {
   if (idx >= 0) history.splice(idx, 1);
   emit('task', snapshot(nt));
   runTask(nt).catch((e) => {
-    nt.status = 'failed';
-    nt.error = String(e && e.message || e);
+    // last resort: a deliberate stop must not end up labelled as a failure
+    nt.status = nt.cancelRequested ? 'canceled' : nt.pauseRequested ? 'paused' : 'failed';
+    if (nt.status === 'failed') nt.error = String(e && e.message || e);
     nt.finishedAt = Date.now();
     emit('task', snapshot(nt, { withLogs: true }));
+    persistFinished(nt);
   });
   return { task: snapshot(nt) };
 }

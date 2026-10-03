@@ -203,10 +203,20 @@ function startTdl(args, { cwd, env } = {}) {
     resolve({ exitCode, signal });
   }));
 
+  // node-pty's kill() path is unreliable on this setup: its console-process-list
+  // agent crashes ("AttachConsole failed") on every invocation, so the child can
+  // outlive the kill and keep holding tdl's single-writer bolt DB lock. Always
+  // terminate the child process directly first; proc.kill() then only cleans up
+  // the console.
+  const hardKill = () => { try { if (proc.pid) process.kill(proc.pid); } catch { /* already gone */ } };
+
   return {
     proc,
     write: (s) => { try { proc.write(s); } catch { /* pty closed */ } },
-    kill: () => { try { proc.kill(); } catch { /* already gone */ } },
+    kill: () => {
+      hardKill();
+      try { proc.kill(); } catch { /* already gone */ }
+    },
     // Graceful stop: Ctrl+C lets tdl save its resume progress and clean up,
     // which is what makes "pause then continue" work. Falls back to a hard
     // kill if tdl does not exit in time.
@@ -217,6 +227,7 @@ function startTdl(args, { cwd, env } = {}) {
       try { proc.write('\x03'); } catch { /* pty closed */ }
       setTimeout(() => {
         if (done) return;
+        hardKill();
         try { proc.kill(); } catch { /* already gone */ }
         finish('killed');
       }, graceMs);
