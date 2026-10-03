@@ -49,6 +49,11 @@ const FETCH_RETRIES = 5;
 // Rounds the response loop retries a failed block before giving up — rides
 // out a flapping proxy route the way the downloader's transfer rounds do.
 const BLOCK_ROUNDS = 10;
+// Blocks kept in flight PER WORKER. 1MiB blocks are RTT-bound, so overlapping
+// a couple of requests per worker hides latency; total sockets stay bounded by
+// the user's `streamConnections` setting (workers = that budget / depth), so
+// raising it never multiplies the socket count beyond what was configured.
+const PIPELINE_DEPTH = 2;
 // HEAD enrichment of the file list, and how long task lookups stay cached.
 const ENRICH_CONCURRENCY = 6;
 const TASK_LOOKUP_TTL = 15_000;
@@ -518,12 +523,55 @@ class FileStreamer {
     this.bytes = 0;            // memory used by cached blocks
     this.taskPaths = null;
     this.taskPathsAt = 0;
+    // --- buffering telemetry (surfaced to the player HUD) ---
+    // Highest byte offset reached contiguously enough to be playable, so the
+    // progress bar can show a real "buffered ahead" region.
+    this.netBytes = 0;         // bytes pulled over the network this session
+    this.netAt = Date.now();
+    this.netBps = 0;           // smoothed prefetch throughput
+    this.hits = 0;             // blocks served without a network round trip
   }
 
   // The playhead estimate: block the browser asked for last. A jump backward
   // by more than a few blocks is a seek — restart the prefetch window there.
   advance(blk) {
     if (blk > this.cursor || this.cursor - blk > 4) this.cursor = blk;
+  }
+
+  // Rough "how far ahead is data ready" estimate: the furthest block that is
+  // already cached or on disk, walking forward from the playhead. Used for the
+  // buffered region on the progress bar.
+  bufferedAhead() {
+    if (this.cursor < 0) return 0;
+    let end = this.cursor;
+    while (end + 1 < this.blockCount && (this.mem.has(end + 1) || this.inflight.has(end + 1))) end++;
+    return Math.min(this.total, (end + 1) * BLOCK);
+  }
+
+  // Prefetch rate, exponentially smoothed so the HUD number stays readable.
+  noteNet(bytes) {
+    this.netBytes += bytes;
+    const now = Date.now();
+    const dt = now - this.netAt;
+    if (dt >= 900) {
+      const inst = (this.netBytes / (dt / 1000));
+      this.netBps = this.netBps ? Math.round(this.netBps * 0.4 + inst * 0.6) : Math.round(inst);
+      this.netBytes = 0;
+      this.netAt = now;
+    }
+  }
+
+  stats() {
+    return {
+      cursor: this.cursor,
+      buffered: this.bufferedAhead(),
+      total: this.total,
+      netBps: this.netBps,
+      cacheMB: Math.round(this.bytes / 1048576),
+      active: this.inflight.size,
+      workers: this.workers,
+      queue: this.queue.length,
+    };
   }
 
   async sourceFor(blk) {
@@ -537,9 +585,9 @@ class FileStreamer {
   /**
    * Yield the bytes of block `blk` from offset `from` to its end, in order.
    * The urgent path (cache miss, no prefetch in flight) fetches the block as
-   * 256KiB sub-slices over parallel connections and yields each as it lands,
-   * so playback starts after ~256KiB instead of a whole block; the assembled
-   * block is still cached for later.
+   * small sub-slices over parallel connections and yields each as it lands, so
+   * playback starts after the first slice instead of a whole block; the
+   * assembled block is still cached for later.
    */
   async *blockData(blk, from = 0) {
     this.advance(blk);
@@ -555,11 +603,12 @@ class FileStreamer {
     const running = this.inflight.get(blk);
     if (running) { yield emit(await running); return; }
 
-    // urgent fetch: all sub-slices start in parallel (a handful of connections
-    // beats one), then are yielded in order as each lands — playback starts
-    // after ~256KiB instead of a whole block. The assembled block is cached.
+    // urgent fetch: all sub-slices start in parallel, then are yielded in
+    // order as each lands. Slices are deliberately small: on a slow link the
+    // first bytes must arrive in about a second, and waiting for a whole 1MiB
+    // block is what made playback appear to hang at the start of a 4K video.
     const start = blk * BLOCK;
-    const SLICE = 256 * 1024;
+    const SLICE = 64 * 1024;
     const slices = [];
     for (let off = 0; off < blockLen; off += SLICE) {
       const end = start + Math.min(off + SLICE, blockLen) - 1;
@@ -620,6 +669,7 @@ class FileStreamer {
         }
         const buf = Buffer.concat(chunks);
         if (buf.length !== want) throw new Error(`提前断开（${buf.length}/${want} 字节）`);
+        this.noteNet(buf.length);
         return buf;
       } catch (e) {
         lastErr = e;
@@ -652,15 +702,17 @@ class FileStreamer {
     }
   }
 
-  // Keep `streamWindowMB` fetched beyond the playhead with a bounded pool.
-  // The window INCLUDES the current block: if an urgent fetch for it keeps
-  // failing (route flap), the pool's retries land it in the cache and the
-  // next response round reads it from memory instead of dying with the route.
+  // Keep `streamWindowMB` fetched ahead of the playhead with a bounded pool.
+  //
+  // The window starts at cursor+1 on purpose: the CURRENT block is served by
+  // the urgent path in small slices, so letting the pool also queue it would
+  // both duplicate work and make the player wait for a whole 1MiB block to
+  // finish — the exact stall that made 4K videos appear to hang on start.
   schedule() {
     const cfg = config.load();
     const windowBlocks = Math.ceil((Number(cfg.streamWindowMB) || 96) * 1048576 / BLOCK);
     const want = [];
-    const from = this.cursor;
+    const from = this.cursor + 1;
     const to = Math.min(this.cursor + windowBlocks, this.blockCount - 1);
     for (let i = from; i <= to; i++) {
       if (this.mem.has(i) || this.inflight.has(i) || this.queued.has(i)) continue;
@@ -668,27 +720,44 @@ class FileStreamer {
     }
     this.queued = new Set(want); // a seek replaces the pending window wholesale
     this.queue = want;
-    const pool = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 64));
+    // `streamConnections` is the TOTAL socket budget: workers × depth must stay
+    // within it, so a high setting never multiplies into hundreds of requests.
+    const budget = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 128));
+    const pool = Math.max(1, Math.ceil(budget / PIPELINE_DEPTH));
     while (this.workers < pool && this.queue.length) {
       this.workers++;
       this.workerLoop();
     }
   }
 
+  // Each worker keeps PIPELINE_DEPTH blocks in flight: it starts the next
+  // block BEFORE awaiting the previous one, so a single slow fetch no longer
+  // serialises its worker. Combined with `pool` workers this keeps up to
+  // pool × PIPELINE_DEPTH requests outstanding, which is what hides the
+  // per-request RTT that dominates at 1MiB block sizes.
   async workerLoop() {
-    while (this.queue.length) {
-      const blk = this.queue.shift();
-      if (blk === undefined) break;
-      try {
+    const cfg = config.load();
+    const pool = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 64));
+    const pending = new Set();
+
+    const start = (blk) => {
+      let p;
+      p = (async () => {
         this.queued.delete(blk);
-        if (this.mem.has(blk) || this.inflight.has(blk)) continue;
-        // a running download task may already have this block on disk
-        if (await this.sourceFor(blk)) continue;
-        // register as inflight so an urgent fetch dedups against us
-        const p = this.fetchBlock(blk).finally(() => this.inflight.delete(blk));
-        this.inflight.set(blk, p);
-        await p;
-      } catch { /* a missed prefetch block is refetched on demand */ }
+        if (this.mem.has(blk) || this.inflight.has(blk)) return;
+        if (await this.sourceFor(blk)) return;
+        const q = this.fetchBlock(blk).finally(() => this.inflight.delete(blk));
+        this.inflight.set(blk, q);
+        await q;
+      })().catch(() => { /* a missed prefetch block is refetched on demand */ })
+        .finally(() => pending.delete(p));
+      pending.add(p);
+    };
+
+    while (true) {
+      while (pending.size < PIPELINE_DEPTH && this.queue.length) start(this.queue.shift());
+      if (!pending.size) break;
+      await Promise.race(pending);
     }
     this.workers--;
   }
@@ -811,6 +880,23 @@ function state() {
   return { session: sessionSnapshot(), streamDir: STREAM_DIR };
 }
 
+// Live buffering stats for one file, polled by the player HUD. Cheap: reads
+// counters the streamer already maintains, no network or disk work.
+function stats(sid, idxStr) {
+  const s = session;
+  if (!s || s.sid !== sid) return { error: '播放会话不存在或已关闭' };
+  const file = s.files[parseInt(idxStr, 10)];
+  if (!file) return { error: '文件不存在' };
+  const st = s.streamers.get(file.idx);
+  if (!st) {
+    return {
+      cursor: -1, buffered: 0, total: file.size,
+      netBps: 0, cacheMB: 0, active: 0, workers: 0, queue: 0,
+    };
+  }
+  return st.stats();
+}
+
 function stop(sid) {
   if (session && sid && session.sid !== sid) return { error: '会话不匹配' };
   return stopSession('manual');
@@ -826,4 +912,4 @@ setInterval(() => {
   }
 }, 30_000).unref();
 
-module.exports = { preview, state, stop, handlePlay, BLOCK };
+module.exports = { preview, state, stop, handlePlay, stats, BLOCK };

@@ -197,6 +197,12 @@ async function api(req, res, pathname, searchParams) {
     const body = await readBody(req);
     return sendJson(res, 200, stream.stop(body.sid || ''));
   }
+  // live buffering stats for the player HUD (session lookup only — no
+  // outbound request, so nothing here is user-controlled beyond the key)
+  m = p.match(/^\/api\/stream\/([0-9a-f]+)\/(\d+)\/stats$/);
+  if (method === 'GET' && m) {
+    return sendJson(res, 200, stream.stats(m[1], m[2]));
+  }
   m = p.match(/^\/api\/stream\/([0-9a-f]+)\/(\d+)$/);
   if (m && (method === 'GET' || method === 'HEAD')) {
     return stream.handlePlay(req, res, m[1], m[2]);

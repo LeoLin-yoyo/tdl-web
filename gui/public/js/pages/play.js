@@ -13,6 +13,9 @@ const state = {
   mediaOnly: false,
 };
 
+let hud = null;      // active player wiring (cleared when the page unmounts)
+let hudTimer = null; // idle timer that hides the control overlay
+
 function urlsOf() {
   const el = document.getElementById('p-urls');
   return (el ? el.value : '').split(/\r?\n|;/).map((s) => s.trim()).filter(Boolean);
@@ -40,9 +43,20 @@ function badge(file) {
   return playable;
 }
 
+// mm:ss (or h:mm:ss for long videos)
+function fmtClock(sec) {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0;
+  const s = Math.floor(sec % 60);
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  const p = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+}
+
 function renderList(view) {
   const box = view.querySelector('#file-list');
   const sess = state.session;
+  if (!box) return;
   if (!sess) {
     box.innerHTML = '<div class="empty">解析后这里会列出链接中的媒体文件</div>';
     return;
@@ -74,12 +88,208 @@ function renderList(view) {
   });
 }
 
+// ---- player HUD ----------------------------------------------------------
+//
+// Custom control layer over <video>: the native bar cannot show a buffered
+// range together with our own badges (resolution top-left, prefetch speed
+// top-right). Everything lives in one overlay that fades out after the mouse
+// goes idle — including in fullscreen — so nothing lingers over the picture.
+
+function showUi(shell, sticky = false) {
+  const ui = shell.querySelector('.pl-ui');
+  ui.classList.remove('pl-hidden');
+  if (hudTimer) clearTimeout(hudTimer);
+  if (sticky) return; // pointer is over the controls: keep them up
+  hudTimer = setTimeout(() => {
+    const v = shell.querySelector('video');
+    if (v && !v.paused) ui.classList.add('pl-hidden'); // never hide while paused
+  }, 2600);
+}
+
+function setupPlayer(view) {
+  const shell = view.querySelector('#player-shell');
+  const video = view.querySelector('#player');
+  const ui = view.querySelector('.pl-ui');
+  const track = view.querySelector('#pl-track');
+  const bufEl = view.querySelector('#pl-buf');
+  const playEl = view.querySelector('#pl-play');
+  const thumbEl = view.querySelector('#pl-thumb');
+  const timeEl = view.querySelector('#pl-time');
+  const resEl = view.querySelector('#pl-res');
+  const speedEl = view.querySelector('#pl-speed');
+  const centerBtn = view.querySelector('#pl-center');
+  const muteBtn = view.querySelector('#pl-mute');
+  const volEl = view.querySelector('#pl-vol');
+  const fsBtn = view.querySelector('#pl-fs');
+
+  hud = { shell, video, poll: null, idx: -1, sid: '' };
+
+  const setPlayIcon = () => {
+    centerBtn.textContent = video.paused ? '▶' : '❚❚';
+    centerBtn.classList.toggle('pl-fade', !video.paused);
+  };
+  const togglePlay = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
+
+  // ---- progress bar: played + buffered ranges ----
+  const paintBar = () => {
+    const dur = video.duration;
+    if (!Number.isFinite(dur) || dur <= 0) {
+      playEl.style.width = '0%';
+      bufEl.style.width = '0%';
+      timeEl.textContent = '0:00 / 0:00';
+      return;
+    }
+    const pct = (video.currentTime / dur) * 100;
+    playEl.style.width = `${pct}%`;
+    thumbEl.style.left = `${pct}%`;
+
+    // Buffered ranges come as a TimeRanges list; merge them into one bar so
+    // the user sees exactly how much is seekable ahead of the playhead.
+    let covered = 0;
+    try {
+      const ranges = [];
+      for (let i = 0; i < video.buffered.length; i++) {
+        ranges.push([video.buffered.start(i), video.buffered.end(i)]);
+      }
+      ranges.sort((a, b) => a[0] - b[0]);
+      let end = 0;
+      for (const [s, e] of ranges) {
+        if (s > end) break;         // gap: only count the contiguous head
+        end = Math.max(end, e);
+      }
+      covered = end;
+    } catch { /* not ready */ }
+    bufEl.style.width = `${Math.min(100, (covered / dur) * 100)}%`;
+    timeEl.textContent = `${fmtClock(video.currentTime)} / ${fmtClock(dur)}`;
+  };
+
+  const seekTo = (clientX) => {
+    const rect = track.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = ratio * video.duration;
+    }
+  };
+  let dragging = false;
+  track.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    track.setPointerCapture(e.pointerId);
+    seekTo(e.clientX);
+  });
+  track.addEventListener('pointermove', (e) => { if (dragging) seekTo(e.clientX); });
+  const endDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    try { track.releasePointerCapture(e.pointerId); } catch { /* gone */ }
+  };
+  track.addEventListener('pointerup', endDrag);
+  track.addEventListener('pointercancel', endDrag);
+
+  // ---- buttons ----
+  centerBtn.onclick = togglePlay;
+  video.onclick = togglePlay;
+  muteBtn.onclick = () => {
+    video.muted = !video.muted;
+    muteBtn.textContent = video.muted ? '🔇' : '🔊';
+  };
+  volEl.oninput = () => { video.volume = Number(volEl.value); video.muted = video.volume === 0; muteBtn.textContent = video.muted ? '🔇' : '🔊'; };
+  fsBtn.onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else shell.requestFullscreen().catch(() => toast('无法进入全屏（浏览器限制）', 'error'));
+  };
+  document.addEventListener('fullscreenchange', () => {
+    fsBtn.textContent = document.fullscreenElement ? '⤢' : '⛶';
+  });
+
+  // ---- resolution badge ----
+  const updateRes = () => {
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    resEl.textContent = w && h ? `${w}×${h}${h >= 2000 ? ' 4K' : h >= 1000 ? ' 1080p' : ''}` : '—';
+  };
+  video.addEventListener('loadedmetadata', () => { updateRes(); paintBar(); });
+  video.addEventListener('resize', updateRes);
+  video.addEventListener('durationchange', paintBar);
+  video.addEventListener('timeupdate', paintBar);
+  video.addEventListener('progress', paintBar);
+  video.addEventListener('seeked', paintBar);
+  video.addEventListener('play', setPlayIcon);
+  video.addEventListener('pause', () => { setPlayIcon(); showUi(shell); });
+  video.addEventListener('waiting', () => shell.classList.add('pl-waiting'));
+  video.addEventListener('playing', () => shell.classList.remove('pl-waiting'));
+  video.addEventListener('canplay', () => shell.classList.remove('pl-waiting'));
+
+  // ---- mouse activity controls the whole overlay ----
+  shell.addEventListener('pointermove', () => showUi(shell));
+  shell.addEventListener('pointerenter', () => showUi(shell));
+  ui.addEventListener('pointerenter', () => showUi(shell, true));
+  ui.addEventListener('pointerleave', () => showUi(shell));
+  shell.addEventListener('pointerleave', () => {
+    if (hudTimer) clearTimeout(hudTimer);
+    if (!video.paused) ui.classList.add('pl-hidden');
+  });
+
+  // ---- keyboard (space / arrows / f / m) ----
+  hud.keyHandler = (e) => {
+    if (!hud || hud.video !== video) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    switch (e.key) {
+      case ' ': case 'k': e.preventDefault(); togglePlay(); showUi(shell); break;
+      case 'ArrowRight': video.currentTime = Math.min(video.duration || 0, video.currentTime + 5); showUi(shell); break;
+      case 'ArrowLeft': video.currentTime = Math.max(0, video.currentTime - 5); showUi(shell); break;
+      case 'ArrowUp': video.volume = Math.min(1, video.volume + 0.05); volEl.value = String(video.volume); break;
+      case 'ArrowDown': video.volume = Math.max(0, video.volume - 0.05); volEl.value = String(video.volume); break;
+      case 'f': fsBtn.onclick(); break;
+      case 'm': muteBtn.onclick(); break;
+      default: break;
+    }
+  };
+  document.addEventListener('keydown', hud.keyHandler);
+
+  ui.classList.add('pl-hidden');
+  setPlayIcon();
+  updateRes();
+}
+
+// Poll the proxy for prefetch throughput while a file is loaded.
+function startStatsPoll(sid, idx) {
+  if (!hud) return;
+  if (hud.poll) clearInterval(hud.poll);
+  hud.sid = sid;
+  hud.idx = idx;
+  const speedEl = hud.shell.querySelector('#pl-speed');
+  const tick = async () => {
+    if (!hud || hud.sid !== sid || hud.idx !== idx) return;
+    try {
+      const s = await api(`/api/stream/${encodeURIComponent(sid)}/${idx}/stats`);
+      if (!hud || hud.sid !== sid || hud.idx !== idx) return;
+      if (s.error) { speedEl.textContent = '—'; return; }
+      const rate = s.netBps ? `${fmtBytes(s.netBps)}/s` : '0 B/s';
+      const ahead = Math.max(0, s.buffered - (s.cursor >= 0 ? s.cursor * 1048576 : 0));
+      speedEl.textContent = `缓冲 ${rate}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
+      speedEl.classList.toggle('warn', !!s.netBps && s.netBps < 4 * 1048576);
+    } catch { /* transient */ }
+  };
+  tick();
+  hud.poll = setInterval(tick, 1000);
+}
+
+function teardownPlayer() {
+  if (!hud) return;
+  if (hud.poll) clearInterval(hud.poll);
+  if (hud.keyHandler) document.removeEventListener('keydown', hud.keyHandler);
+  hud = null;
+  if (hudTimer) { clearTimeout(hudTimer); hudTimer = null; }
+}
+
 async function play(view, idx) {
   const sess = state.session;
   if (!sess) return;
   const file = sess.files[idx];
   if (!file) return;
   const video = view.querySelector('#player');
+  const shell = view.querySelector('#player-shell');
   const wrap = view.querySelector('#player-card');
   wrap.classList.remove('hidden');
   state.playingIdx = idx;
@@ -87,6 +297,8 @@ async function play(view, idx) {
   video.src = `/api/stream/${encodeURIComponent(sess.sid)}/${idx}`;
   video.play().catch(() => { /* autoplay may need a gesture; controls still work */ });
   renderList(view);
+  startStatsPoll(sess.sid, idx);
+  if (shell) showUi(shell);
 
   // 边看边下: create download tasks for the session's links once per session —
   // they fill .part files in the background, and the player reads their
@@ -150,7 +362,31 @@ async function render(view) {
         </div>
         <div class="card hidden" id="player-card">
           <h2 id="player-title">正在播放</h2>
-          <video id="player" controls preload="auto" playsinline style="width:100%;max-height:60vh;background:#000;border-radius:8px"></video>
+          <div class="player-shell" id="player-shell">
+            <video id="player" playsinline preload="auto"></video>
+            <div class="pl-ui pl-hidden">
+              <div class="pl-badge pl-res" id="pl-res">—</div>
+              <div class="pl-badge pl-speed" id="pl-speed">—</div>
+              <button class="pl-center" id="pl-center" title="播放/暂停">▶</button>
+              <div class="pl-bar">
+                <div class="pl-track" id="pl-track" title="拖动跳转">
+                  <div class="pl-buf" id="pl-buf"></div>
+                  <div class="pl-play" id="pl-play"></div>
+                  <div class="pl-thumb" id="pl-thumb"></div>
+                </div>
+                <div class="pl-row">
+                  <span class="pl-time" id="pl-time">0:00 / 0:00</span>
+                  <span class="pl-grow"></span>
+                  <button class="pl-btn" id="pl-mute" title="静音">🔊</button>
+                  <input type="range" class="pl-vol" id="pl-vol" min="0" max="1" step="0.05" value="1" title="音量">
+                  <button class="pl-btn" id="pl-fs" title="全屏">⛶</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="hint muted small" style="margin-top:6px">
+            移动鼠标显示控制条与信息；全屏后自动隐藏。快捷键：空格播放/暂停、←/→ 快退快进 5s、↑/↓ 音量、F 全屏、M 静音。
+          </div>
         </div>
       </div>
       <div class="card task-list-col">
@@ -160,15 +396,18 @@ async function render(view) {
       </div>
     </div>`;
 
+  teardownPlayer();
   await draftLoad(view);
+  setupPlayer(view);
   try {
     const r = await api('/api/stream/state');
-    if (r.session) { state.session = r.session; renderList(view); }
-    else renderList(view);
-  } catch { renderList(view); }
+    if (r.session) state.session = r.session;
+  } catch { /* no session yet */ }
+  renderList(view);
 
   view.querySelector('#parse-btn').onclick = () => parse(view);
   view.querySelector('#stop-btn').onclick = async () => {
+    teardownPlayer();
     try { await api('/api/stream/stop', { method: 'POST', body: { sid: state.session ? state.session.sid : '' } }); } catch { /* ignore */ }
     state.session = null;
     state.playingIdx = -1;

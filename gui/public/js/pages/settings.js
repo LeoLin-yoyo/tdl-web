@@ -74,17 +74,17 @@ async function render(view) {
     <div class="card">
       <h2>在线播放</h2>
       <div class="hint muted small" style="margin-bottom:12px">
-        播放由本地多连接预取池供流（单连接只有 ~0.1 MB/s，跑不动视频）。窗口越大起播越稳，缓存越大拖回越快。
+        播放由本地多连接预取池供流（单连接只有 ~0.1 MB/s，跑不动视频）。4K 码率远高于 1080p，默认值已按 4K 调大；线路带宽足够时可继续加大。
       </div>
       <div class="grid c2">
-        <div class="field"><label>播放预取连接数</label>
-          <input type="number" id="s-streamconn" value="${cfg.streamConnections ?? 16}" min="1" max="64">
-          <span class="hint">实测 16 连接 ≈ 2.8 MB/s，足够 1080p 实时播放</span></div>
+        <div class="field"><label>播放预取连接数（总预算）</label>
+          <input type="number" id="s-streamconn" value="${cfg.streamConnections ?? 48}" min="1" max="128">
+          <span class="hint">预取的总并发连接预算，越大越快；实际在途请求不会超过这个数</span></div>
         <div class="field"><label>预取窗口（MB）</label>
-          <input type="number" id="s-streamwin" value="${cfg.streamWindowMB ?? 96}" min="8" max="1024">
-          <span class="hint">保持播放头前方这么多数据已取回</span></div>
+          <input type="number" id="s-streamwin" value="${cfg.streamWindowMB ?? 256}" min="8" max="4096">
+          <span class="hint">保持播放头前方这么多数据已取回；4K 建议 256MB 以上</span></div>
         <div class="field"><label>内存缓存上限（MB）</label>
-          <input type="number" id="s-streamcache" value="${cfg.streamCacheMB ?? 256}" min="32" max="4096">
+          <input type="number" id="s-streamcache" value="${cfg.streamCacheMB ?? 512}" min="32" max="8192">
           <span class="hint">已取块驻留内存的总量，拖回进度条时秒响应</span></div>
         <div class="field"><label>空闲自动关闭（分钟）</label>
           <input type="number" id="s-streamidle" value="${cfg.streamIdleMin ?? 10}" min="1" max="240">
@@ -130,9 +130,9 @@ async function render(view) {
   }, view.querySelector('#s-save'));
 
   view.querySelector('#s-save-stream').onclick = () => saveConfig({
-    streamConnections: Number(view.querySelector('#s-streamconn').value) || 16,
-    streamWindowMB: Number(view.querySelector('#s-streamwin').value) || 96,
-    streamCacheMB: Number(view.querySelector('#s-streamcache').value) || 256,
+    streamConnections: Number(view.querySelector('#s-streamconn').value) || 48,
+    streamWindowMB: Number(view.querySelector('#s-streamwin').value) || 256,
+    streamCacheMB: Number(view.querySelector('#s-streamcache').value) || 512,
     streamIdleMin: Number(view.querySelector('#s-streamidle').value) || 10,
   }, view.querySelector('#s-save-stream'));
 

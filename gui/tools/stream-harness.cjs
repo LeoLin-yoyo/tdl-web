@@ -242,7 +242,20 @@ async function main() {
   check('final file served from disk', !serveHits.some((h) => h.start <= AFTER && h.end >= AFTER + 499999), JSON.stringify(serveHits));
   tasksStub.__setServeSessions([]);
 
-  // ---- 6. link whitelist (the only user text that reaches tdl args) -----------
+  // ---- 7. HUD stats -----------------------------------------------------------
+  // (before the link-validation section, which replaces the session)
+  console.log('# stats');
+  const s0 = stream.stats(sid, '0');
+  check('stats shape', typeof s0.buffered === 'number' && typeof s0.total === 'number'
+    && typeof s0.netBps === 'number' && typeof s0.active === 'number', JSON.stringify(s0));
+  check('stats total matches file', s0.total === FILE_SIZE, String(s0.total));
+  check('stats buffered within file', s0.buffered >= 0 && s0.buffered <= FILE_SIZE, String(s0.buffered));
+  const sBad = stream.stats(sid, '99');
+  check('stats rejects unknown file', !!sBad.error, JSON.stringify(sBad));
+  const sWrong = stream.stats('deadbeef', '0');
+  check('stats rejects unknown session', !!sWrong.error, JSON.stringify(sWrong));
+
+  // ---- 8. link whitelist (the only user text that reaches tdl args) -----------
   console.log('# link validation');
   const linkCases = [
     ['https://t.me/HOTAVES/23006', true],
@@ -277,7 +290,7 @@ async function main() {
     JSON.stringify(rebuilt.session && rebuilt.session.urls));
   if (rebuilt.session) await stream.stop('');
 
-  // ---- 7. stop ----------------------------------------------------------------
+  // ---- 9. stop ----------------------------------------------------------------
   console.log('# stop');
   const st = await stream.stop(sid);
   check('stop ok', st.ok === true);

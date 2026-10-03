@@ -307,3 +307,76 @@ details.adv .adv-body { padding-top: 10px; }
 }
 .tag.ok { color: var(--accent); border-color: var(--accent); }
 .tag.warn { color: #e0a24a; border-color: #e0a24a; }
+
+/* ---- 自定义播放器（控制条 + 缓冲区间 + 分辨率/速度徽标） ---- */
+.player-shell {
+  position: relative; width: 100%; max-height: 62vh; background: #000;
+  border-radius: 8px; overflow: hidden; line-height: 0;
+}
+.player-shell video { width: 100%; max-height: 62vh; display: block; background: #000; }
+.player-shell.pl-waiting video { opacity: .82; }
+
+.pl-ui {
+  position: absolute; inset: 0; pointer-events: none;
+  transition: opacity .25s ease; opacity: 1;
+  font-family: inherit; line-height: 1.4;
+}
+.pl-ui.pl-hidden { opacity: 0; }
+.pl-ui.pl-hidden .pl-bar,
+.pl-ui.pl-hidden .pl-badge,
+.pl-ui.pl-hidden .pl-center { pointer-events: none; }
+
+/* 左上：分辨率；右上：缓冲速度 */
+.pl-badge {
+  position: absolute; top: 10px; padding: 3px 9px; border-radius: 6px;
+  background: rgba(0,0,0,.62); color: #e8eefc; font-size: 12px;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  backdrop-filter: blur(2px);
+}
+.pl-res { left: 12px; }
+.pl-speed { right: 12px; }
+.pl-speed.warn { color: #e0a24a; }
+
+/* 中央播放/暂停 */
+.pl-center {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  width: 62px; height: 62px; border-radius: 50%; border: none; cursor: pointer;
+  background: rgba(0,0,0,.55); color: #fff; font-size: 22px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: auto; transition: opacity .2s ease, background .15s ease;
+}
+.pl-center:hover { background: rgba(0,0,0,.75); }
+.pl-center.pl-fade { opacity: 0; pointer-events: none; }
+
+/* 底部控制条 */
+.pl-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; pointer-events: auto;
+  padding: 26px 14px 10px; color: #e8eefc;
+  background: linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0));
+}
+.pl-track {
+  position: relative; height: 5px; border-radius: 3px; cursor: pointer;
+  background: rgba(255,255,255,.24); margin-bottom: 8px;
+}
+.pl-track::before { /* larger hit area */
+  content: ''; position: absolute; left: 0; right: 0; top: -7px; bottom: -7px;
+}
+.pl-buf  { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: rgba(255,255,255,.42); }
+.pl-play { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 3px; background: var(--accent); }
+.pl-thumb {
+  position: absolute; top: 50%; left: 0; width: 12px; height: 12px; border-radius: 50%;
+  background: #fff; transform: translate(-50%,-50%); box-shadow: 0 1px 3px rgba(0,0,0,.5);
+}
+.pl-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.pl-grow { flex: 1; }
+.pl-time { font-variant-numeric: tabular-nums; }
+.pl-btn {
+  background: none; border: none; color: #e8eefc; cursor: pointer;
+  font-size: 15px; padding: 2px 4px; line-height: 1;
+}
+.pl-btn:hover { color: var(--accent); }
+.pl-vol { width: 78px; accent-color: var(--accent); cursor: pointer; }
+
+/* 全屏时铺满，隐藏圆角 */
+.player-shell:fullscreen { max-height: none; border-radius: 0; }
+.player-shell:fullscreen video { max-height: none; height: 100%; }
