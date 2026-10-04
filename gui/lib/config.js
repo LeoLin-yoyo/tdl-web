@@ -11,12 +11,44 @@ const DATA_DIR = path.join(GUI_ROOT, 'data');
 const CONFIG_FILE = path.join(DATA_DIR, 'gui-config.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'tasks-history.json');
 
-// Locate tdl.exe: env override > ./tdl.exe > sibling tdl_Windows_64bit > PATH.
+// The executable name differs per platform (and on Windows the shipped
+// release folder is `tdl_Windows_64bit`, so a bare `tdl.exe` inside it).
+const TDL_EXE = process.platform === 'win32' ? 'tdl.exe' : 'tdl';
+
+// Where an auto-downloaded tdl is unpacked (see lib/tdlfetch.js).
+const TDL_AUTO_DIR = path.join(GUI_ROOT, 'tdl');
+
+// Locate the tdl executable. Order (first hit wins):
+//   1. explicit path in settings (gui-config.json `tdlPath`)
+//   2. TDL_GUI_TDL_PATH env var
+//   3. an auto-downloaded copy under gui/tdl/
+//   4. ./tdl.exe next to the GUI
+//   5. a sibling release folder (tdl_Windows_64bit/, tdl_*/)
+//   6. bare name, resolved through PATH by the caller
 function locateTdl() {
   const candidates = [];
+  const fromCfg = (() => {
+    try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).tdlPath; } catch { return ''; }
+  })();
+  if (fromCfg) candidates.push(fromCfg);
   if (process.env.TDL_GUI_TDL_PATH) candidates.push(process.env.TDL_GUI_TDL_PATH);
-  candidates.push(path.join(GUI_ROOT, 'tdl.exe'));
-  candidates.push(path.join(GUI_ROOT, '..', 'tdl_Windows_64bit', 'tdl.exe'));
+  // auto-downloaded copies (flat and inside an extracted release folder)
+  candidates.push(path.join(TDL_AUTO_DIR, TDL_EXE));
+  try {
+    for (const ent of fs.readdirSync(TDL_AUTO_DIR, { withFileTypes: true })) {
+      if (ent.isDirectory()) candidates.push(path.join(TDL_AUTO_DIR, ent.name, TDL_EXE));
+    }
+  } catch { /* not downloaded yet */ }
+  candidates.push(path.join(GUI_ROOT, TDL_EXE));
+  // sibling release folders: tdl_Windows_64bit/, tdl_Linux_64bit/, ...
+  try {
+    const parent = path.join(GUI_ROOT, '..');
+    for (const ent of fs.readdirSync(parent, { withFileTypes: true })) {
+      if (ent.isDirectory() && /^tdl[_-]/i.test(ent.name)) {
+        candidates.push(path.join(parent, ent.name, TDL_EXE));
+      }
+    }
+  } catch { /* ignore */ }
   for (const c of candidates) {
     try { if (c && fs.statSync(c).isFile()) return path.resolve(c); } catch { /* keep looking */ }
   }
@@ -26,6 +58,9 @@ function locateTdl() {
 const DEFAULTS = {
   proxy: '',            // tdl --proxy, e.g. socks5://127.0.0.1:7890
   ns: 'default',        // tdl --ns
+  // Absolute path to the tdl executable. Empty = auto-discover (see
+  // locateTdl). Users on another OS or with tdl elsewhere set this here.
+  tdlPath: '',
   dir: path.join(GUI_ROOT, 'downloads'), // download root + file browser root
   threads: 4,           // tdl -t
   limit: 2,             // tdl -l
@@ -171,6 +206,6 @@ function saveHistory(list) {
 }
 
 module.exports = {
-  GUI_ROOT, DATA_DIR, CONFIG_FILE, HISTORY_FILE,
+  GUI_ROOT, DATA_DIR, CONFIG_FILE, HISTORY_FILE, TDL_AUTO_DIR, TDL_EXE,
   locateTdl, load, save, globalArgs, loadHistory, saveHistory, downloadDefaults,
 };

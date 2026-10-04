@@ -19,6 +19,22 @@ async function render(view) {
       </div>
 
       <div class="card">
+        <h2>tdl 可执行文件</h2>
+        <div class="hint muted small" style="margin-bottom:10px">
+          留空则自动查找（gui/tdl/ → 项目目录 → 同级发布目录 → PATH）。装在其他位置、或不是 Windows 时，在这里填可执行文件的完整路径。
+        </div>
+        <div class="field"><label>tdl 路径（可执行文件完整路径，留空=自动查找）</label>
+          <input type="text" id="s-tdlpath" value="${esc(cfg.tdlPath || '')}" placeholder="例如 D:\\tools\\tdl\\tdl.exe">
+          <span class="hint">当前使用：<span class="mono" id="s-tdlcur">检测中…</span></span></div>
+        <div style="margin-top:6px">
+          <button class="btn primary" id="s-save-tdl">保存路径</button>
+          <button class="btn" id="s-tdl-dl">自动下载 tdl</button>
+          <button class="btn" id="s-tdl-refresh">重新检测</button>
+        </div>
+        <div class="hint muted small" id="s-tdl-info" style="margin-top:8px">—</div>
+      </div>
+
+      <div class="card">
         <h2>性能默认值</h2>
         <div class="grid c3">
         <div class="field"><label>单文件线程 -t</label>
@@ -110,12 +126,65 @@ async function render(view) {
       const r = await api('/api/config', { method: 'POST', body: { config: patch } });
       store.config = r.config;
       toast('已保存', 'ok');
+      return r;
     } catch (e) {
       toast(e.message, 'error');
+      return null;
     } finally {
       if (btn) btn.disabled = false;
     }
   }
+
+  // ---- tdl path / auto-download -------------------------------------------
+  const tdlCur = view.querySelector('#s-tdlcur');
+  const tdlInfo = view.querySelector('#s-tdl-info');
+
+  async function refreshTdlStatus() {
+    try {
+      const st = await api('/api/tdl/status');
+      tdlCur.textContent = st.current || '未找到';
+      tdlCur.style.color = st.hasTdl ? 'var(--text)' : '#e0a24a';
+      tdlInfo.textContent = `自动下载目录：${st.autoDir}　目标包：${st.target}`
+        + (st.installed ? `　已下载：${st.installed}` : '');
+    } catch (e) {
+      tdlInfo.textContent = `检测失败：${e.message}`;
+    }
+  }
+  refreshTdlStatus();
+
+  view.querySelector('#s-save-tdl').onclick = async () => {
+    const r = await saveConfig({ tdlPath: view.querySelector('#s-tdlpath').value.trim() }, view.querySelector('#s-save-tdl'));
+    if (r) {
+      await refreshTdlStatus();
+      // reload the status chip so the version/tdl path reflect the new binary
+      toast(r.tdlFound ? `tdl 已切换：${r.tdlPath}` : '已保存，但该路径下没找到 tdl 可执行文件', r.tdlFound ? 'ok' : 'error');
+    }
+  };
+  view.querySelector('#s-tdl-refresh').onclick = refreshTdlStatus;
+
+  view.querySelector('#s-tdl-dl').onclick = async () => {
+    const btn = view.querySelector('#s-tdl-dl');
+    btn.disabled = true;
+    btn.textContent = '下载中…';
+    try {
+      await api('/api/tdl/download', { method: 'POST', body: {} });
+      // poll the job until it settles
+      for (let i = 0; i < 300; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const job = await api('/api/tdl/download');
+        if (job.phase === 'done') { toast(`tdl 下载完成：${job.path}`, 'ok'); break; }
+        if (job.phase === 'error') { toast(`下载失败：${job.message}`, 'error'); break; }
+        btn.textContent = job.phase === 'extract' ? '解压中…' : '下载中…';
+        tdlInfo.textContent = job.message || '…';
+      }
+      await refreshTdlStatus();
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '自动下载 tdl';
+    }
+  };
 
   view.querySelector('#s-save').onclick = () => saveConfig({
     proxy: view.querySelector('#s-proxy').value.trim(),

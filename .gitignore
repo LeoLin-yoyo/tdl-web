@@ -11,6 +11,9 @@ gui/downloads/
 *.part
 *.part.json
 
+# 自动下载的 tdl 可执行文件（按平台命名，体积大，各机器自行下载）
+gui/tdl/
+
 # tdl 自身的会话/登录态（若被放在项目内）
 .tdl/
 

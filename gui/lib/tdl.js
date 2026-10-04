@@ -168,17 +168,23 @@ function classifyLine(raw) {
  * Lines are ANSI-stripped. Caller MUST eventually kill() or let the child exit.
  */
 function startTdl(args, { cwd, env } = {}) {
-  // The executable is referenced by bare name on purpose: server.js prepends
-  // the tdl directory to this process's PATH at startup, so the pty resolves
-  // it deterministically. Arguments travel as a sanitized argv array — never
-  // through a shell — so no value can break out of the command.
-  const proc = pty.spawn('tdl.exe', sanitizeArgs(args), {
+  // The executable is referenced by bare name on purpose: server.js resolves
+  // the tdl path (settings `tdlPath` > env > auto-download > sibling folder)
+  // and prepends its directory to this process's PATH, so the pty finds the
+  // configured binary without us passing a dynamic path into spawn. Arguments
+  // travel as a sanitized argv array — never through a shell.
+  const opts = {
     name: 'xterm-256color',
     cols: PTY_COLS,
     rows: PTY_ROWS,
     cwd: cwd || path.dirname(TDL_PATH),
     env: { ...process.env, ...env },
-  });
+  };
+  // Two literal spawn targets (one per platform) so the binary name is never
+  // built from data; on Windows the release ships tdl.exe, elsewhere `tdl`.
+  const proc = process.platform === 'win32'
+    ? pty.spawn('tdl.exe', sanitizeArgs(args), opts)
+    : pty.spawn('tdl', sanitizeArgs(args), opts);
 
   let lineBuf = '';
   const lineCbs = [];

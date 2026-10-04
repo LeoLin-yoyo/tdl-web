@@ -71,6 +71,11 @@ const BLOCK_ROUNDS = 10;
 // the user's `streamConnections` setting (workers = that budget / depth), so
 // raising it never multiplies the socket count beyond what was configured.
 const PIPELINE_DEPTH = 2;
+// A prefetch worker whose pipeline is empty while an urgent (playhead) fetch
+// runs waits for it rather than exiting (exiting made schedule() spin
+// synchronously). This caps that wait so a leaked `urgent` counter can never
+// park a worker forever.
+const URGENT_WAIT_MAX = 15_000;
 // HEAD enrichment of the file list, and how long task lookups stay cached.
 const ENRICH_CONCURRENCY = 6;
 const TASK_LOOKUP_TTL = 15_000;
@@ -769,8 +774,14 @@ class FileStreamer {
     // waves finish fast (few connections, little mutual contention), and by
     // the time the pool is wide open the browser has a real buffer ahead.
     this.ramp = Math.min((this.ramp || 0) + 2, pool);
-    while (this.workers < this.ramp && this.queue.length) {
+    // Start at most one worker per schedule() call. `this.workers` is only
+    // decremented when a worker's async body finishes, so a loop keyed on it
+    // could spin synchronously and freeze the event loop; `spawned` is the
+    // authoritative count of workers started but not yet accounted for.
+    let spawned = 0;
+    while (this.workers + spawned < this.ramp && this.queue.length && spawned < pool) {
       this.workers++;
+      spawned++;
       this.workerLoop();
     }
   }
@@ -781,8 +792,6 @@ class FileStreamer {
   // pool × PIPELINE_DEPTH requests outstanding, which is what hides the
   // per-request RTT that dominates at 1MiB block sizes.
   async workerLoop() {
-    const cfg = config.load();
-    const pool = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 64));
     const pending = new Set();
 
     const start = (blk) => {
@@ -799,15 +808,27 @@ class FileStreamer {
       pending.add(p);
     };
 
-    while (true) {
-      // an urgent (playhead) fetch pauses new pool starts: with the pool
-      // saturating the serve, the urgent unit requests queued behind every
-      // in-flight block and the first bytes arrived minutes late or never
-      while (pending.size < PIPELINE_DEPTH && this.queue.length && !this.urgent) start(this.queue.shift());
-      if (!pending.size) break;
-      await Promise.race(pending);
+    try {
+      let pausedFor = 0; // ms spent waiting on an urgent fetch
+      while (true) {
+        // An urgent (playhead) fetch pauses NEW pool starts: with the pool
+        // saturating the serve, the playhead's unit requests queued behind
+        // every in-flight block and the first bytes arrived minutes late.
+        while (pending.size < PIPELINE_DEPTH && this.queue.length && !this.urgent) start(this.queue.shift());
+        if (pending.size) { await Promise.race(pending); pausedFor = 0; continue; }
+        if (!this.queue.length) break; // nothing left to prefetch: done
+        // Paused by an urgent fetch with an empty pipeline. Wait for it to
+        // finish instead of returning — returning here made schedule()'s
+        // `while (this.workers < ramp)` spin forever synchronously (the
+        // counter is only decremented in the finally below), freezing the
+        // event loop: pause then resume hung the whole page.
+        if (pausedFor > URGENT_WAIT_MAX) break; // safety valve: never wait forever
+        await sleep(50);
+        pausedFor += 50;
+      }
+    } finally {
+      this.workers--;
     }
-    this.workers--;
   }
 }
 

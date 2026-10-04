@@ -118,6 +118,7 @@ function setupPlayer(view) {
   const resEl = view.querySelector('#pl-res');
   const speedEl = view.querySelector('#pl-speed');
   const centerBtn = view.querySelector('#pl-center');
+  const toggleBtn = view.querySelector('#pl-toggle');
   const muteBtn = view.querySelector('#pl-mute');
   const volEl = view.querySelector('#pl-vol');
   const fsBtn = view.querySelector('#pl-fs');
@@ -125,8 +126,13 @@ function setupPlayer(view) {
   hud = { shell, video, poll: null, idx: -1, sid: '' };
 
   const setPlayIcon = () => {
+    // The centre button is an overlay affordance only: while playing it fades
+    // out so it never sits on the picture. The in-bar button is the always
+    // reachable control, so it keeps the real state.
     centerBtn.textContent = video.paused ? '▶' : '❚❚';
     centerBtn.classList.toggle('pl-fade', !video.paused);
+    toggleBtn.textContent = video.paused ? '▶' : '❚❚';
+    toggleBtn.title = video.paused ? '播放（空格）' : '暂停（空格）';
   };
   const togglePlay = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
 
@@ -187,6 +193,7 @@ function setupPlayer(view) {
 
   // ---- buttons ----
   centerBtn.onclick = togglePlay;
+  toggleBtn.onclick = (e) => { e.stopPropagation(); togglePlay(); showUi(shell); };
   video.onclick = togglePlay;
   muteBtn.onclick = () => {
     video.muted = !video.muted;
@@ -383,6 +390,7 @@ async function render(view) {
                   <div class="pl-thumb" id="pl-thumb"></div>
                 </div>
                 <div class="pl-row">
+                  <button class="pl-btn pl-btn-play" id="pl-toggle" title="播放/暂停（空格）">▶</button>
                   <span class="pl-time" id="pl-time">0:00 / 0:00</span>
                   <span class="pl-grow"></span>
                   <button class="pl-btn" id="pl-mute" title="静音">🔊</button>

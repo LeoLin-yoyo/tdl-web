@@ -14,21 +14,31 @@ const files = require('./lib/files');
 const desktop = require('./lib/desktop');
 const db = require('./lib/db');
 const stream = require('./lib/stream');
+const tdlfetch = require('./lib/tdlfetch');
 
-// ---- resolve tdl.exe and make it resolvable by bare name ------------------
-const tdlPath = config.locateTdl();
-if (tdlPath) {
-  global.TDL_PATH = tdlPath;
-  const dir = path.dirname(tdlPath);
-  // The pty starts `tdl.exe` by bare name; PATH of THIS process is what
-  // CreateProcess searches, so prepend the tdl directory.
-  if (!process.env.PATH.includes(dir)) {
-    process.env.PATH = `${dir}${path.delimiter}${process.env.PATH || ''}`;
+// In-flight auto-download state, polled by the settings page.
+let tdlFetchJob = null;
+
+// ---- resolve the tdl executable and make it resolvable by bare name -------
+//
+// Re-runnable: changing the tdl path on the settings page (or finishing an
+// auto-download) calls this again so the new binary is picked up without a
+// server restart.
+function resolveTdl() {
+  const found = config.locateTdl();
+  global.TDL_PATH = found || (process.platform === 'win32' ? 'tdl.exe' : 'tdl');
+  if (found) {
+    const dir = path.dirname(found);
+    // The pty starts tdl by bare name; PATH of THIS process is what the OS
+    // searches, so put the configured directory first.
+    const parts = (process.env.PATH || '').split(path.delimiter).filter((p) => p && p !== dir);
+    process.env.PATH = `${dir}${path.delimiter}${parts.join(path.delimiter)}`;
+  } else {
+    console.warn('[tdl-gui] 未找到 tdl，将依赖 PATH 查找。可在设置页指定 tdl 路径，或使用自动下载。');
   }
-} else {
-  global.TDL_PATH = 'tdl.exe';
-  console.warn('[tdl-gui] 未找到 tdl.exe，将依赖 PATH 查找。可用环境变量 TDL_GUI_TDL_PATH 指定。');
+  return found;
 }
+resolveTdl();
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const HOST = process.env.TDL_GUI_HOST || '127.0.0.1';
@@ -152,7 +162,29 @@ async function api(req, res, pathname, searchParams) {
   if (method === 'POST' && p === '/api/config') {
     const body = await readBody(req);
     const next = config.save(body.config || {});
-    return sendJson(res, 200, { config: next });
+    // a changed tdl path must take effect immediately, not after a restart
+    resolveTdl();
+    return sendJson(res, 200, { config: next, tdlPath: global.TDL_PATH, tdlFound: !!config.locateTdl() });
+  }
+  // ---- tdl auto-download (lib/tdlfetch.js) ----
+  if (method === 'GET' && p === '/api/tdl/status') {
+    return sendJson(res, 200, { ...tdlfetch.status(), current: global.TDL_PATH });
+  }
+  if (method === 'POST' && p === '/api/tdl/download') {
+    if (tdlFetchJob) return sendJson(res, 200, { error: '已有下载任务在进行中', ...tdlFetchJob });
+    tdlFetchJob = { phase: 'query', message: '准备中…', startedAt: Date.now() };
+    tdlfetch.downloadLatest({ onProgress: (p) => { tdlFetchJob = { ...tdlFetchJob, ...p }; } })
+      .then((r) => {
+        tdlFetchJob = { phase: 'done', message: `已安装 ${r.version || ''}`.trim(), path: r.path, finishedAt: Date.now() };
+        resolveTdl(); // pick the fresh binary up at once
+      })
+      .catch((e) => {
+        tdlFetchJob = { phase: 'error', message: String(e.message || e), finishedAt: Date.now() };
+      });
+    return sendJson(res, 200, { ok: true, started: true });
+  }
+  if (method === 'GET' && p === '/api/tdl/download') {
+    return sendJson(res, 200, tdlFetchJob || { phase: 'idle' });
   }
   if (method === 'GET' && p === '/api/chats') {
     try {

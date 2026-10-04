@@ -131,7 +131,7 @@ Telegram 官方客户端的视频播放是**限速**的，而且往往要**整�
 - **Windows**（10/11）
 - **Node.js 22+**（用到了内置的 `node:sqlite`）
 - 一个能用的**代理**（直连 Telegram 通常不通）
-- `tdl.exe` —— 从 [tdl Releases](https://github.com/iyear/tdl/releases) 下载，放到本项目的 `tdl_Windows_64bit/` 目录
+- `tdl` 可执行文件 —— **不用手动准备**：首次启动后在设置页点「自动下载 tdl」即可，它会按你的系统与架构从 [tdl Releases](https://github.com/iyear/tdl/releases) 拉取对应版本并解压到 `gui/tdl/`。也可手动下载后放到项目目录，或在设置页填自定义路径。
 
 ### 三步跑起来
 
@@ -312,10 +312,11 @@ curl -o /dev/null --proxy socks5h://127.0.0.1:7890 -w "%{speed_download} B/s\n" 
 
 ## 已知限制
 
-- **仅 Windows**：`tdlw` 脚本用 VBScript，`tdl.exe` 也依赖 Windows 路径
+- **仅 Windows**：`tdlw` 脚本用 VBScript，`tdl.exe` 也依赖 Windows 路径（tdl 本身支持 Linux/macOS，可自行指定路径运行）
 - **任务串行**：受 tdl 数据库单写者限制，多个任务排队执行（在线播放不受此限制，见上文）
 - **播放格式受限**：浏览器只能直接播放 mp4/webm 等容器，mkv/avi 需下载后用本地播放器
 - **无时长/缩略图**：文件列表只显示文件名与大小，暂无时长、分辨率、缩略图（需要额外解析消息元数据）
+- **4K 播放取决于线路带宽**：播放代理能跑满可用带宽，但 4K 实时播放需 ~15 MB/s，带宽不足时会持续缓冲
 - 依赖 tdl 的 `--serve` 模式，该功能在上游标记为 Beta
 - 需要自备代理
 
