@@ -102,12 +102,20 @@ function assertLoopback(url) {
   return u;
 }
 
+// tdl serve writes the filename as raw UTF-8 bytes inside a plain
+// filename="..." param, but HTTP header values reach JS as latin1-decoded
+// strings (node:http and undici alike map every byte to one char), so the
+// bytes must be re-assembled or every non-ASCII name turns into mojibake.
+function decodeHeaderFilename(s) {
+  return /[\x80-\xff]/.test(s) ? Buffer.from(s, 'latin1').toString('utf8') : s;
+}
+
 function filenameFrom(headers, fallback) {
   const disp = String((headers && headers.get && headers.get('content-disposition')) || '');
   const star = disp.match(/filename\*=UTF-8''([^;]+)/i);
   if (star) return decodeURIComponent(star[1]);
   const plain = disp.match(/filename="?([^";]+)"?/i);
-  if (plain) return plain[1];
+  if (plain) return decodeHeaderFilename(plain[1]);
   return fallback;
 }
 

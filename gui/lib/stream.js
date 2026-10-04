@@ -8,10 +8,12 @@
 //   browser ──Range──▶ /api/stream/:sid/:idx ──▶ FileStreamer ──▶ tdl --serve
 //                          (206)          memory LRU + parallel prefetch pool
 //
-//  - every browser range is answered from 4MiB blocks held in a memory LRU
+//  - every browser range is answered from 1MiB blocks held in a memory LRU
 //  - a worker pool keeps `streamWindowMB` fetched ahead of the playhead using
 //    many parallel connections (throughput scales with concurrency: measured
 //    16 conns ≈ 2.8 MB/s, 48 ≈ 5.4 MB/s against a 1.7GB file)
+//  - serve only ships whole 512KiB units (see SERVE_UNIT): all ranges we
+//    issue are unit-aligned, the urgent path slices locally to the byte
 //  - 边看边下: when a download task over the same links is running, its finished
 //    8MiB blocks in <name>.part (+ sidecar) are read straight from disk — the
 //    watched video never pulls the same bytes twice
@@ -38,13 +40,28 @@ const files = require('./files');
 // one small block over a single connection — a 4MiB block measured ~30s of
 // start-up latency on a slow link. The prefetch pool (many parallel
 // connections) is what keeps total throughput up, not the block size.
+// BLOCK is 2×SERVE_UNIT, so every block starts on a unit boundary.
 const BLOCK = 1024 * 1024;
+// tdl --serve only ever delivers whole 512KiB units of a requested range,
+// starting at a unit-aligned offset (measured live 2026-10-04): a range
+// smaller than one unit, or starting inside one, comes back with an empty or
+// truncated body while Content-Length still advertises the full length; a
+// span ending at EOF keeps its partial tail; and every response arrives only
+// after the whole requested span has been fetched from Telegram (ttfb ==
+// total). So EVERY range we issue must be unit-aligned with whole-unit
+// length (EOF-clipped for the tail), and the urgent path slices locally to
+// satisfy the browser's exact range. This is what broke the earlier 64KiB
+// urgent slices: each came back empty, block 0 never landed, and the browser
+// never received a single byte while the prefetch window kept filling.
+const SERVE_UNIT = 512 * 1024;
 // serve-dl's downloader block size — the .part sidecar indexes THIS size, so
 // a disk read needs every overlapping task block to be complete.
 const TASK_BLOCK = 8 * 1024 * 1024;
 // A connection delivering no bytes for this long is treated as dead — a
-// degraded Telegram route stalls silently instead of erroring.
-const STALL_TIMEOUT = 15_000;
+// degraded Telegram route stalls silently instead of erroring. Serve sends
+// nothing until its whole requested span is fetched, so this must comfort-
+// ably exceed a slow unit fetch (~10s at heavily contended per-conn rates).
+const STALL_TIMEOUT = 30_000;
 const FETCH_RETRIES = 5;
 // Rounds the response loop retries a failed block before giving up — rides
 // out a flapping proxy route the way the downloader's transfer rounds do.
@@ -520,6 +537,7 @@ class FileStreamer {
     this.queue = [];
     this.workers = 0;
     this.cursor = -1;
+    this.urgent = 0;           // active urgent (playhead) block fetches; > 0 pauses pool starts
     this.bytes = 0;            // memory used by cached blocks
     this.taskPaths = null;
     this.taskPathsAt = 0;
@@ -584,63 +602,84 @@ class FileStreamer {
 
   /**
    * Yield the bytes of block `blk` from offset `from` to its end, in order.
+   *
    * The urgent path (cache miss, no prefetch in flight) fetches the block as
-   * small sub-slices over parallel connections and yields each as it lands, so
-   * playback starts after the first slice instead of a whole block; the
-   * assembled block is still cached for later.
+   * SERVE_UNIT-aligned whole units in parallel and yields each as it lands,
+   * slicing locally to satisfy the caller's exact offset — serve refuses to
+   * ship partial units, so sub-unit requests would come back empty (that is
+   * the bug that made 4K playback hang at 0:00 forever). While an urgent
+   * fetch is running the pool is paused (this.urgent > 0 stops workers from
+   * starting new blocks): with `streamConnections` sockets saturating the
+   * serve, a fresh urgent request previously queued behind all of them and
+   * the browser waited 25s+ for bytes it should get in a second or two.
    */
   async *blockData(blk, from = 0) {
     this.advance(blk);
-    this.schedule();
     const blockLen = Math.min(BLOCK, this.total - blk * BLOCK);
     const emit = (buf) => buf.subarray(Math.min(from, buf.length));
     from = Math.min(from, blockLen);
 
     const disk = await this.sourceFor(blk);
-    if (disk) { yield emit(disk); return; }
+    if (disk) { this.schedule(); yield emit(disk); return; }
     const hit = this.mem.get(blk);
-    if (hit) { hit.at = Date.now(); yield emit(hit.buf); return; }
+    if (hit) { hit.at = Date.now(); this.schedule(); yield emit(hit.buf); return; }
     const running = this.inflight.get(blk);
-    if (running) { yield emit(await running); return; }
+    if (running) { this.schedule(); yield emit(await running); return; }
 
-    // urgent fetch: all sub-slices start in parallel, then are yielded in
-    // order as each lands. Slices are deliberately small: on a slow link the
-    // first bytes must arrive in about a second, and waiting for a whole 1MiB
-    // block is what made playback appear to hang at the start of a 4K video.
-    const start = blk * BLOCK;
-    const SLICE = 64 * 1024;
-    const slices = [];
-    for (let off = 0; off < blockLen; off += SLICE) {
-      const end = start + Math.min(off + SLICE, blockLen) - 1;
-      const p = this.fetchRange(start + off, end);
-      p.catch(() => {}); // abandoned slices (seek away / disconnect) must not hit unhandledRejection
-      slices.push({ off, p });
-    }
-    const all = Promise.all(slices.map((s) => s.p)).then((bufs) => {
-      const buf = Buffer.concat(bufs);
-      this.mem.set(blk, { buf, at: Date.now() });
-      this.bytes += buf.length;
-      this.evict();
-      return buf;
-    }).finally(() => this.inflight.delete(blk));
-    all.catch(() => {}); // same for the assembled-block promise
-    this.inflight.set(blk, all);
-
-    let skip = from;
-    for (const s of slices) {
-      const buf = await s.p;
-      let piece = buf;
-      if (skip > 0) {
-        const cut = Math.min(skip, buf.length);
-        piece = buf.subarray(cut);
-        skip -= cut;
+    this.urgent++;
+    try {
+      const start = blk * BLOCK; // unit-aligned: BLOCK is 2×SERVE_UNIT
+      const units = [];
+      for (let off = 0; off < blockLen; off += SERVE_UNIT) {
+        // the final unit of the final block ends at EOF, where serve DOES
+        // deliver its partial tail; everywhere else this is a whole unit
+        const end = start + Math.min(off + SERVE_UNIT, blockLen) - 1;
+        const p = this.fetchRange(start + off, end);
+        p.catch(() => {}); // abandoned units (seek away / disconnect) must not hit unhandledRejection
+        units.push({ off, p });
       }
-      if (piece.length) yield piece;
+      const all = Promise.all(units.map((u) => u.p)).then((bufs) => {
+        const buf = Buffer.concat(bufs);
+        this.mem.set(blk, { buf, at: Date.now() });
+        this.bytes += buf.length;
+        this.evict();
+        return buf;
+      }).finally(() => this.inflight.delete(blk));
+      all.catch(() => {}); // same for the assembled-block promise
+      this.inflight.set(blk, all);
+
+      let skip = from;
+      for (const u of units) {
+        const buf = await u.p;
+        let piece = buf;
+        if (skip > 0) {
+          const cut = Math.min(skip, buf.length);
+          piece = buf.subarray(cut);
+          skip -= cut;
+        }
+        if (piece.length) yield piece;
+      }
+    } finally {
+      this.urgent--;
+      this.schedule(); // the playhead block is in: the pool may fill ahead again
     }
   }
 
+  // Fetch [start, end] from the serve.
+  //
+  // tdl's serve streams through `partio.NewStreamer(..., partSize)` with
+  // partSize = 512KiB (see tdl cmd/root.go: the deprecated `--size` flag
+  // defaults to 512*1024), and partio ALIGNS every read down to that unit
+  // (`nearestOffset`: offset - offset%align). A request that is not
+  // unit-aligned therefore does not come back as the bytes asked for — which
+  // is exactly why the earlier 64KiB urgent slices starved and 4K playback
+  // hung at 0:00. So every range is aligned here and the caller receives
+  // whole units; blockData clips to the exact offset it needs.
   async fetchRange(start, end) {
-    const want = end - start + 1;
+    const alignedStart = Math.floor(start / SERVE_UNIT) * SERVE_UNIT;
+    const isTail = end >= this.total - 1;
+    const alignedEnd = isTail ? this.total - 1 : Math.ceil((end + 1) / SERVE_UNIT) * SERVE_UNIT - 1;
+    const want = alignedEnd - alignedStart + 1;
     let lastErr = null;
     // The proxy route flaps in batches (whole waves of ECONNRESET); a few
     // jittered retries ride out the short ones instead of killing playback.
@@ -648,12 +687,12 @@ class FileStreamer {
       const stall = new AbortController();
       let lastByte = Date.now();
       const wd = setInterval(() => {
-        if (Date.now() - lastByte > STALL_TIMEOUT) stall.abort(new Error('连接 15 秒无数据'));
+        if (Date.now() - lastByte > STALL_TIMEOUT) stall.abort(new Error('连接持续无数据'));
       }, 2000);
       try {
         // URL built inside fetchLocal from the session's own port + vetted href
         const res = await fetchLocal(this.sess.port, servePath(this.file), {
-          headers: { Range: `bytes=${start}-${end}` },
+          headers: { Range: `bytes=${alignedStart}-${alignedEnd}` },
           signal: stall.signal,
         }, 1);
         if (res.status !== 206 && res.status !== 200) {
@@ -724,7 +763,13 @@ class FileStreamer {
     // within it, so a high setting never multiplies into hundreds of requests.
     const budget = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 128));
     const pool = Math.max(1, Math.ceil(budget / PIPELINE_DEPTH));
-    while (this.workers < pool && this.queue.length) {
+    // Slow-start: a fully-opened pool's first wave (~48 mutually throttled
+    // connections) only lands after ~25s on a contended route, which stalls
+    // playback right after it started. Ramp workers up instead — the early
+    // waves finish fast (few connections, little mutual contention), and by
+    // the time the pool is wide open the browser has a real buffer ahead.
+    this.ramp = Math.min((this.ramp || 0) + 2, pool);
+    while (this.workers < this.ramp && this.queue.length) {
       this.workers++;
       this.workerLoop();
     }
@@ -755,7 +800,10 @@ class FileStreamer {
     };
 
     while (true) {
-      while (pending.size < PIPELINE_DEPTH && this.queue.length) start(this.queue.shift());
+      // an urgent (playhead) fetch pauses new pool starts: with the pool
+      // saturating the serve, the urgent unit requests queued behind every
+      // in-flight block and the first bytes arrived minutes late or never
+      while (pending.size < PIPELINE_DEPTH && this.queue.length && !this.urgent) start(this.queue.shift());
       if (!pending.size) break;
       await Promise.race(pending);
     }
@@ -815,7 +863,10 @@ async function handlePlay(req, res, sid, idxStr) {
   };
   if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${file.size}`;
   res.writeHead(partial ? 206 : 200, headers);
-
+  // flush the 206 immediately: Node only puts headers on the wire with the
+  // first body write, and the first unit can take seconds on a slow link —
+  // an unflushed response looks dead to the browser's media loader
+  res.flushHeaders();
   if (req.method === 'HEAD') return res.end();
 
   const st = streamerFor(s, file);
@@ -836,11 +887,16 @@ async function handlePlay(req, res, sid, idxStr) {
         try {
           for await (const piece of st.blockData(blk, off + delivered)) {
             if (res.destroyed) return;
-            if (!res.write(piece)) {
+            // a block piece routinely overshoots the browser's range end
+            // (units ship whole); writing it unclipped would exceed our own
+            // Content-Length — a protocol error the browser rejects
+            const remaining = need - delivered;
+            const out = piece.length > remaining ? piece.subarray(0, remaining) : piece;
+            if (!res.write(out)) {
               await new Promise((resolve) => { res.once('drain', resolve); });
               if (res.destroyed) return;
             }
-            delivered += piece.length;
+            delivered += out.length;
             if (delivered >= need) break;
           }
         } catch (e) {

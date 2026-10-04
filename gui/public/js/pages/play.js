@@ -218,6 +218,14 @@ function setupPlayer(view) {
   video.addEventListener('waiting', () => shell.classList.add('pl-waiting'));
   video.addEventListener('playing', () => shell.classList.remove('pl-waiting'));
   video.addEventListener('canplay', () => shell.classList.remove('pl-waiting'));
+  // a failed load used to leave the player spinning forever with no hint
+  video.addEventListener('error', () => {
+    shell.classList.remove('pl-waiting');
+    const code = video.error && video.error.code;
+    const msg = { 1: '加载被中断', 2: '网络错误', 3: '解码失败', 4: '格式或编码不受浏览器支持' }[code] || '未知错误';
+    speedEl.textContent = `播放失败：${msg}`;
+    toast(`视频无法播放：${msg}`, 'error');
+  });
 
   // ---- mouse activity controls the whole overlay ----
   shell.addEventListener('pointermove', () => showUi(shell));

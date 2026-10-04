@@ -65,15 +65,27 @@ async function main() {
     let start = 0; let end = FILE_SIZE - 1; let status = 200;
     if (m) { start = parseInt(m[1], 10); end = m[2] ? Math.min(parseInt(m[2], 10), FILE_SIZE - 1) : FILE_SIZE - 1; status = 206; }
     serveHits.push({ start, end });
+    // Emulate tdl --serve's REAL range behaviour, verified against upstream
+    // source: serve streams through partio.NewStreamer(..., partSize) with
+    // partSize = 512KiB (cmd/root.go: the deprecated --size flag defaults to
+    // 512*1024), and partio aligns every read DOWN to that unit
+    // (`nearestOffset`: offset - offset%align). So the bytes that come back
+    // start at a unit boundary and cover whole units — NOT necessarily the
+    // range that was asked for. A span ending at EOF keeps its partial tail.
+    // The proxy must align its own requests and clip locally, which is what
+    // the 64KiB urgent slices got wrong (block 0 never landed → 4K hung).
+    const U = 512 * 1024;
+    const qs = start - (start % U); // partio nearestOffset: round DOWN
+    const qe = end === FILE_SIZE - 1 ? end : Math.ceil((end + 1) / U) * U - 1;
     res.writeHead(status, {
       'Content-Length': String(end - start + 1), 'Accept-Ranges': 'bytes',
       ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${FILE_SIZE}` } : {}),
       'Content-Disposition': `attachment; filename="${name}"`,
     });
-    let pos = start;
+    let pos = qs;
     const timer = setInterval(() => {
-      if (pos > end) { clearInterval(timer); res.end(); return; }
-      const len = Math.min(64 * 1024, end - pos + 1);
+      if (pos > qe) { clearInterval(timer); res.end(); return; }
+      const len = Math.min(64 * 1024, qe - pos + 1);
       const buf = Buffer.alloc(len);
       for (let i = 0; i < len; i++) buf[i] = PATTERN(pos + i);
       res.write(buf);
@@ -149,6 +161,21 @@ async function main() {
   check('size from HEAD', files[0] && files[0].size === FILE_SIZE, files[0] && String(files[0].size));
   check('ext/playable', files[0] && files[0].ext === 'mp4' && files[0].playable === true);
   check('second file pdf not playable', files[1] && files[1].ext === 'pdf' && files[1].playable === false);
+  // tdl serve writes the filename as raw UTF-8 bytes and every HTTP client
+  // hands JS the header latin1-decoded — filenameFrom must re-assemble it or
+  // non-ASCII names show up as mojibake in the file list. (Node's own http
+  // server refuses to EMIT those C1 bytes alongside Content-Length, so this
+  // is tested against a header shim instead of the fake serve.)
+  const serveDl = require(path.join(TMP, 'lib', 'serve-dl.js'));
+  const dispOf = (v) => ({ get: (k) => (String(k).toLowerCase() === 'content-disposition' ? v : null) });
+  const mojibakeDisp = `attachment; filename="${Buffer.from('凡人修仙传 第194集.pdf', 'utf8').toString('latin1')}"`;
+  check('filenameFrom re-decodes latin1 header bytes',
+    serveDl.filenameFrom(dispOf(mojibakeDisp), '') === '凡人修仙传 第194集.pdf',
+    serveDl.filenameFrom(dispOf(mojibakeDisp), ''));
+  check('filenameFrom passes ascii through',
+    serveDl.filenameFrom(dispOf('attachment; filename="IMG_1428.MP4"'), '') === 'IMG_1428.MP4');
+  check('filenameFrom handles RFC5987 encoded names',
+    serveDl.filenameFrom(dispOf(`attachment; filename*=UTF-8''${encodeURIComponent('凡人.pdf')}`), '') === '凡人.pdf');
   serveHits = [];
 
   const get = async (range, idx = 0) => {
@@ -181,6 +208,26 @@ async function main() {
   const CROSS = 1024 * 1024 - 5;
   resp = await get(`bytes=${CROSS}-${CROSS + 11}`);
   check('block-crossing bytes exact', resp.body.equals(expected(CROSS, 12)));
+
+  // ---- 2b. serve unit quantization -------------------------------------------
+  // The fake serve now only ships whole 512KiB units from aligned starts,
+  // like the real one. The old 64KiB urgent slices came back empty here —
+  // block 0 never landed and playback never started (缓冲 200M+ 不起播).
+  console.log('# serve unit quantization');
+  const U = 512 * 1024;
+  const QSTART = 12 * 1024 * 1024 + 123; // mid-unit start, untouched block
+  resp = await get(`bytes=${QSTART}-${QSTART + 65535}`);
+  check('sub-unit range over quantized serve bytes exact',
+    resp.body.equals(expected(QSTART, 65536)));
+  check('content-length equals body (no overshoot)',
+    Number(resp.headers.get('content-length')) === resp.body.length,
+    `${resp.headers.get('content-length')} vs ${resp.body.length}`);
+  const MIDBYTE = 12 * 1024 * 1024 + U + 77;
+  resp = await get(`bytes=${MIDBYTE}-${MIDBYTE}`);
+  check('single byte mid-unit exact', resp.body.equals(expected(MIDBYTE, 1)),
+    resp.body.length ? `got ${resp.body.length}B` : 'empty body');
+  resp = await get(`bytes=${FILE_SIZE - 1}-${FILE_SIZE - 1}`);
+  check('final byte via EOF tail unit exact', resp.body.equals(expected(FILE_SIZE - 1, 1)));
 
   // ---- 3. cache: a second identical hit must not touch the serve -------------
   console.log('# cache');
