@@ -102,7 +102,10 @@ function showUi(shell, sticky = false) {
   if (sticky) return; // pointer is over the controls: keep them up
   hudTimer = setTimeout(() => {
     const v = shell.querySelector('video');
-    if (v && !v.paused) ui.classList.add('pl-hidden'); // never hide while paused
+    // Only hide while the picture is actually flowing. Paused or stalled
+    // (buffering / route hiccup) keeps the controls up — hiding them there
+    // is how the play/pause button and buffered bar "disappeared".
+    if (v && !v.paused && v.readyState >= 3) ui.classList.add('pl-hidden');
   }, 2600);
 }
 
@@ -222,8 +225,19 @@ function setupPlayer(view) {
   video.addEventListener('seeked', paintBar);
   video.addEventListener('play', setPlayIcon);
   video.addEventListener('pause', () => { setPlayIcon(); showUi(shell); });
-  video.addEventListener('waiting', () => shell.classList.add('pl-waiting'));
-  video.addEventListener('playing', () => shell.classList.remove('pl-waiting'));
+  // Buffering is exactly when the user needs the controls (and wants to see
+  // that something IS happening): keep the bar up and label it.
+  video.addEventListener('waiting', () => {
+    shell.classList.add('pl-waiting');
+    showUi(shell);
+    const badge = view.querySelector('#pl-speed');
+    if (badge && !badge.dataset.userText) badge.dataset.stalled = '1';
+  });
+  video.addEventListener('playing', () => {
+    shell.classList.remove('pl-waiting');
+    const badge = view.querySelector('#pl-speed');
+    if (badge) delete badge.dataset.stalled;
+  });
   video.addEventListener('canplay', () => shell.classList.remove('pl-waiting'));
   // a failed load used to leave the player spinning forever with no hint
   video.addEventListener('error', () => {
@@ -274,16 +288,34 @@ function startStatsPoll(sid, idx) {
   hud.sid = sid;
   hud.idx = idx;
   const speedEl = hud.shell.querySelector('#pl-speed');
+  const netEl = hud.shell.querySelector('#pl-net');
+  const video = hud.shell.querySelector('video');
   const tick = async () => {
     if (!hud || hud.sid !== sid || hud.idx !== idx) return;
     try {
       const s = await api(`/api/stream/${encodeURIComponent(sid)}/${idx}/stats`);
       if (!hud || hud.sid !== sid || hud.idx !== idx) return;
       if (s.error) { speedEl.textContent = '—'; return; }
+
+      // Paint the proxy's own progress on the track: the browser only buffers
+      // what it happens to need, but the proxy prefetches far ahead — that is
+      // the real "how much is buffered" picture for a streaming source.
+      if (netEl && s.total > 0) {
+        const curBytes = Math.max(0, s.cursor * 1048576);
+        const ready = Math.max(0, s.buffered - curBytes);
+        netEl.style.left = `${Math.min(100, (curBytes / s.total) * 100)}%`;
+        netEl.style.width = `${Math.min(100 - (curBytes / s.total) * 100, (ready / s.total) * 100)}%`;
+      }
+
       const rate = s.netBps ? `${fmtBytes(s.netBps)}/s` : '0 B/s';
       const ahead = Math.max(0, s.buffered - (s.cursor >= 0 ? s.cursor * 1048576 : 0));
-      speedEl.textContent = `缓冲 ${rate}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
-      speedEl.classList.toggle('warn', !!s.netBps && s.netBps < 4 * 1048576);
+      // While the picture is stalled say so plainly — a silent frozen frame
+      // reads as "broken" even when the proxy is retrying the route.
+      const stalled = video && !video.paused && video.readyState < 3;
+      speedEl.textContent = stalled
+        ? `缓冲中 ${rate} · 领先 ${fmtBytes(ahead)}`
+        : `缓冲 ${rate}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
+      speedEl.classList.toggle('warn', stalled || (!!s.netBps && s.netBps < 4 * 1048576));
     } catch { /* transient */ }
   };
   tick();
@@ -385,6 +417,7 @@ async function render(view) {
               <button class="pl-center" id="pl-center" title="播放/暂停">▶</button>
               <div class="pl-bar">
                 <div class="pl-track" id="pl-track" title="拖动跳转">
+                  <div class="pl-net" id="pl-net"></div>
                   <div class="pl-buf" id="pl-buf"></div>
                   <div class="pl-play" id="pl-play"></div>
                   <div class="pl-thumb" id="pl-thumb"></div>

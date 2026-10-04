@@ -84,13 +84,11 @@ const DEFAULTS = {
   // instead of queueing behind a single large file.
   fileConcurrency: 3,
   // Online playback (lib/stream.js). A single serve connection is too slow for
-  // real-time video, so playback is fed from a parallel prefetch pool. More
-  // connections is NOT better past a point: on the flapping Mihomo route,
-  // 8 streams ran a smooth ~1.5 MiB/s while 16+ burst-stalled for 10-60s at a
-  // time (route/DC throttling of connection floods) and 48 stalled the first
-  // wave for ~25s. 8 is the measured sweet spot; raise only if the route
-  // improves.
-  streamConnections: 8, // prefetch connections while playing
+  // real-time video, so playback is fed from a parallel prefetch pool. This is
+  // the pool's CEILING, not a fixed width: the pool starts at 8 and adapts —
+  // +1 worker per few healthy fetches, halving when fetches exhaust retries
+  // (connection floods get throttled hard on a flapping route).
+  streamConnections: 24,
   streamWindowMB: 256,   // keep this much fetched ahead of the playhead
   streamCacheMB: 512,    // in-memory block cache cap (seek-back friendly)
   streamIdleMin: 10,     // close the playback session after this many idle minutes

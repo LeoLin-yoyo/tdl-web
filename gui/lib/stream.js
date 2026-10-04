@@ -71,6 +71,9 @@ const BLOCK_ROUNDS = 10;
 // the user's `streamConnections` setting (workers = that budget / depth), so
 // raising it never multiplies the socket count beyond what was configured.
 const PIPELINE_DEPTH = 2;
+// Initial prefetch width (blocks in flight). The pool then adapts: +1 worker
+// per few healthy fetches, halved when a fetch burns all its retries.
+const POOL_START = 8;
 // A prefetch worker whose pipeline is empty while an urgent (playhead) fetch
 // runs waits for it rather than exiting (exiting made schedule() spin
 // synchronously). This caps that wait so a leaked `urgent` counter can never
@@ -544,6 +547,12 @@ class FileStreamer {
     this.cursor = -1;
     this.urgent = 0;           // active urgent (playhead) block fetches; > 0 pauses pool starts
     this.bytes = 0;            // memory used by cached blocks
+    // --- adaptive concurrency (AIMD) -----------------------------------------
+    // The route's usable bandwidth varies minute to minute, so the pool width
+    // is not a fixed number: it grows while blocks succeed and halves when a
+    // fetch exhausts its retries (connection floods get throttled hard here).
+    this.ramp = Math.min(POOL_START, this.poolBudget());
+    this.okStreak = 0;
     this.taskPaths = null;
     this.taskPathsAt = 0;
     // --- buffering telemetry (surfaced to the player HUD) ---
@@ -559,6 +568,37 @@ class FileStreamer {
   // by more than a few blocks is a seek — restart the prefetch window there.
   advance(blk) {
     if (blk > this.cursor || this.cursor - blk > 4) this.cursor = blk;
+  }
+
+  // ---- adaptive pool width (AIMD) -------------------------------------------
+  // `streamConnections` is the CEILING the user allows; the pool starts narrow
+  // and widens while fetches succeed, halving as soon as a fetch burns all its
+  // retries. On this box's flapping route a wide-open pool is throttled in
+  // waves (16+ burst-stalled 10-60s; 48 stalled its first wave ~25s), so
+  // reacting to failures matters more than a big static number.
+
+  // The user-configured ceiling, expressed in workers (each keeps
+  // PIPELINE_DEPTH blocks in flight).
+  poolBudget() {
+    const cfg = config.load();
+    const budget = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 128));
+    return Math.max(1, Math.ceil(budget / PIPELINE_DEPTH));
+  }
+
+  growPool() {
+    const pool = this.poolBudget();
+    if (this.ramp < pool) {
+      this.ramp = Math.min(pool, this.ramp + 1);
+      this.schedule(); // a wider pool may start immediately
+    }
+  }
+
+  shrinkPool() {
+    this.okStreak = 0;
+    if (this.ramp > 1) {
+      this.ramp = Math.max(1, Math.floor(this.ramp / 2));
+      this.schedule(); // excess workers shed themselves on their next pass
+    }
   }
 
   // Rough "how far ahead is data ready" estimate: the furthest block that is
@@ -593,6 +633,7 @@ class FileStreamer {
       cacheMB: Math.round(this.bytes / 1048576),
       active: this.inflight.size,
       workers: this.workers,
+      ramp: this.ramp,
       queue: this.queue.length,
     };
   }
@@ -728,11 +769,21 @@ class FileStreamer {
   async fetchBlock(blk) {
     const start = blk * BLOCK;
     const end = Math.min(start + BLOCK, this.total) - 1;
-    const buf = await this.fetchRange(start, end);
-    this.mem.set(blk, { buf, at: Date.now() });
-    this.bytes += buf.length;
-    this.evict();
-    return buf;
+    try {
+      const buf = await this.fetchRange(start, end);
+      // healthy fetch: widen the pool a notch every few blocks (AIMD growth)
+      this.okStreak++;
+      if (this.okStreak >= 3) { this.okStreak = 0; this.growPool(); }
+      this.mem.set(blk, { buf, at: Date.now() });
+      this.bytes += buf.length;
+      this.evict();
+      return buf;
+    } catch (e) {
+      // exhausted retries: the route is struggling — shed half the pool so the
+      // remaining connections stop treading on each other
+      this.shrinkPool();
+      throw e;
+    }
   }
 
   evict() {
@@ -764,22 +815,16 @@ class FileStreamer {
     }
     this.queued = new Set(want); // a seek replaces the pending window wholesale
     this.queue = want;
-    // `streamConnections` is the TOTAL socket budget: workers × depth must stay
-    // within it, so a high setting never multiplies into hundreds of requests.
-    const budget = Math.max(1, Math.min(Number(cfg.streamConnections) || 16, 128));
-    const pool = Math.max(1, Math.ceil(budget / PIPELINE_DEPTH));
-    // Slow-start: a fully-opened pool's first wave (~48 mutually throttled
-    // connections) only lands after ~25s on a contended route, which stalls
-    // playback right after it started. Ramp workers up instead — the early
-    // waves finish fast (few connections, little mutual contention), and by
-    // the time the pool is wide open the browser has a real buffer ahead.
-    this.ramp = Math.min((this.ramp || 0) + 2, pool);
+    // The pool width is AIMD-managed (this.ramp): it widens while fetches
+    // succeed and halves when they fail. `streamConnections` is the ceiling —
+    // the pool never exceeds it, so a high setting can't flood the route.
+    const cap = Math.min(this.ramp, this.poolBudget());
     // Start at most one worker per schedule() call. `this.workers` is only
     // decremented when a worker's async body finishes, so a loop keyed on it
     // could spin synchronously and freeze the event loop; `spawned` is the
     // authoritative count of workers started but not yet accounted for.
     let spawned = 0;
-    while (this.workers + spawned < this.ramp && this.queue.length && spawned < pool) {
+    while (this.workers + spawned < cap && this.queue.length && spawned < cap) {
       this.workers++;
       spawned++;
       this.workerLoop();
@@ -814,9 +859,12 @@ class FileStreamer {
         // An urgent (playhead) fetch pauses NEW pool starts: with the pool
         // saturating the serve, the playhead's unit requests queued behind
         // every in-flight block and the first bytes arrived minutes late.
-        while (pending.size < PIPELINE_DEPTH && this.queue.length && !this.urgent) start(this.queue.shift());
+        // AIMD shrink sheds surplus workers here: over-cap workers with an
+        // empty pipeline leave (in-flight work always finishes first).
+        while (pending.size < PIPELINE_DEPTH && this.queue.length && !this.urgent
+               && this.workers <= this.ramp) start(this.queue.shift());
         if (pending.size) { await Promise.race(pending); pausedFor = 0; continue; }
-        if (!this.queue.length) break; // nothing left to prefetch: done
+        if (!this.queue.length || this.workers > this.ramp) break; // done / shed
         // Paused by an urgent fetch with an empty pipeline. Wait for it to
         // finish instead of returning — returning here made schedule()'s
         // `while (this.workers < ramp)` spin forever synchronously (the

@@ -362,6 +362,11 @@ details.adv .adv-body { padding-top: 10px; }
 .pl-track::before { /* larger hit area */
   content: ''; position: absolute; left: 0; right: 0; top: -8px; bottom: -8px;
 }
+/* 代理预取进度：数据已在本地代理就绪的范围（领先于浏览器自身的缓冲） */
+.pl-net  {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px;
+  background: rgba(42,171,238,.28);
+}
 /* 缓冲区间：明显区别于轨道底色，让「已缓冲到哪」一眼可见 */
 .pl-buf  {
   position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px;

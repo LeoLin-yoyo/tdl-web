@@ -90,12 +90,13 @@ async function render(view) {
     <div class="card">
       <h2>在线播放</h2>
       <div class="hint muted small" style="margin-bottom:12px">
-        播放由本地多连接预取池供流（单连接只有 ~0.1 MB/s，跑不动视频）。4K 码率远高于 1080p，默认值已按 4K 调大；线路带宽足够时可继续加大。
+        播放由本地多连接预取池供流（单连接只有 ~0.1 MB/s，跑不动视频）。并发数是<strong>上限</strong>：预取池会自适应——
+        线路健康时自动加到上限，取流失败时自动减半（连接太多反而会被线路限流）。
       </div>
       <div class="grid c2">
-        <div class="field"><label>播放预取连接数（总预算）</label>
-          <input type="number" id="s-streamconn" value="${cfg.streamConnections ?? 48}" min="1" max="128">
-          <span class="hint">预取的总并发连接预算，越大越快；实际在途请求不会超过这个数</span></div>
+        <div class="field"><label>播放预取连接数（上限）</label>
+          <input type="number" id="s-streamconn" value="${cfg.streamConnections ?? 24}" min="1" max="128">
+          <span class="hint">预取池的自适应上限；4K 建议 24 以上，线路差时池会自动收窄</span></div>
         <div class="field"><label>预取窗口（MB）</label>
           <input type="number" id="s-streamwin" value="${cfg.streamWindowMB ?? 256}" min="8" max="4096">
           <span class="hint">保持播放头前方这么多数据已取回；4K 建议 256MB 以上</span></div>
@@ -199,7 +200,7 @@ async function render(view) {
   }, view.querySelector('#s-save'));
 
   view.querySelector('#s-save-stream').onclick = () => saveConfig({
-    streamConnections: Number(view.querySelector('#s-streamconn').value) || 48,
+    streamConnections: Number(view.querySelector('#s-streamconn').value) || 24,
     streamWindowMB: Number(view.querySelector('#s-streamwin').value) || 256,
     streamCacheMB: Number(view.querySelector('#s-streamcache').value) || 512,
     streamIdleMin: Number(view.querySelector('#s-streamidle').value) || 10,
