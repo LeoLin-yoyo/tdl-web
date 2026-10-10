@@ -15,6 +15,10 @@ const desktop = require('./lib/desktop');
 const db = require('./lib/db');
 const stream = require('./lib/stream');
 const tdlfetch = require('./lib/tdlfetch');
+const auth = require('./lib/auth');
+
+// 首次启动：若库里尚无管理员账号，尝试用环境变量引导创建
+auth.bootstrapFromEnv();
 
 // In-flight auto-download state, polled by the settings page.
 let tdlFetchJob = null;
@@ -143,6 +147,67 @@ setTimeout(() => { login.detectLogin().catch(() => {}); }, 3000);
 async function api(req, res, pathname, searchParams) {
   const p = pathname;
   const method = req.method;
+
+  // ---- 认证接口（无需会话即可访问，见 lib/auth.js 的 PUBLIC_PATHS） ----
+
+  if (method === 'GET' && p === '/api/auth/status') {
+    const cookies = auth.parseCookies(req);
+    const token = cookies[auth.sessionCookieName()];
+    const v = auth.verifySession(token);
+    return sendJson(res, 200, {
+      configured: auth.isConfigured(),
+      authenticated: v.ok,
+      username: v.ok ? v.username : null,
+      csrf: v.ok ? auth.csrfTokenFor(token) : null,
+    });
+  }
+
+  if (method === 'POST' && p === '/api/auth/login') {
+    const ip = auth.clientIp(req);
+    const locked = auth.isLockedOut(ip);
+    if (locked > 0) {
+      return sendJson(res, 429, {
+        error: 'too many attempts',
+        message: `尝试次数过多，请在 ${locked} 秒后重试`,
+        retryAfter: locked,
+      });
+    }
+    if (!auth.isConfigured()) {
+      return sendJson(res, 409, { error: 'not configured', message: '管理员账号尚未设置' });
+    }
+    const body = await readBody(req);
+    const username = String(body.username || '').trim();
+    const password = String(body.password || '');
+    // 用户名与密码都校验，但对外统一报“用户名或密码错误”，不泄露哪个错了
+    const okUser = username.length > 0;
+    const okPass = okUser ? auth.verifyPassword(password) : false;
+    if (!okUser || !okPass) {
+      const rec = auth.recordFail(ip);
+      const left = Math.max(0, auth.MAX_FAILS - rec.count);
+      return sendJson(res, 401, {
+        error: 'invalid credentials',
+        message: left > 0 ? `用户名或密码错误，还可尝试 ${left} 次` : '错误次数过多，账号已临时锁定',
+      });
+    }
+    auth.clearFails(ip);
+    const { token, exp } = auth.issueSession(username);
+    const secure = auth.isSecureRequest(req);
+    res.setHeader('Set-Cookie', auth.buildSessionCookie(token, exp, secure));
+    return sendJson(res, 200, {
+      ok: true,
+      username,
+      csrf: auth.csrfTokenFor(token),
+      expiresAt: exp,
+    });
+  }
+
+  if (method === 'POST' && p === '/api/auth/logout') {
+    // 吊销该用户全部会话（无状态令牌必须显式作废，否则旧 Cookie 在过期前仍有效）
+    auth.revokeAllSessions();
+    const secure = auth.isSecureRequest(req);
+    res.setHeader('Set-Cookie', auth.buildLogoutCookie(secure));
+    return sendJson(res, 200, { ok: true });
+  }
 
   if (method === 'GET' && p === '/api/version') {
     return sendJson(res, 200, { version: versionCache.text, tdlPath: global.TDL_PATH });
@@ -358,7 +423,34 @@ const server = http.createServer((req, res) => {
   } catch {
     return sendJson(res, 400, { error: 'bad request' });
   }
-  if (pathname.startsWith('/api/')) {
+  // ---- 访问认证门禁（在路由分发之前统一拦截） ----
+  // 逻辑：/api/* 未登录返回 401 JSON；页面请求未登录则跳转登录页。
+  // 登录接口与登录页自身放行（见 lib/auth.js 的 PUBLIC_PATHS）。
+  const isApi = pathname.startsWith('/api/');
+  const isLoginPage = pathname === '/login.html';
+
+  if (!isLoginPage) {
+    const denied = auth.guard(req, res, pathname, req.method || 'GET');
+    if (denied) {
+      if (isApi) {
+        res.writeHead(denied.status, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(denied.body));
+      } else {
+        // 页面请求：跳到登录页，并带上原目标便于登录后返回
+        res.writeHead(302, {
+          'Location': '/login.html',
+          'Cache-Control': 'no-store',
+        });
+        res.end();
+      }
+      return;
+    }
+  }
+
+  if (isApi) {
     api(req, res, pathname, searchParams).catch((e) => {
       try { sendJson(res, 500, { error: String(e.message || e) }); } catch { /* headed out */ }
     });
