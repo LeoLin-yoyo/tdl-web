@@ -19,6 +19,9 @@ const RE_ERR_DB = /database is used by another process/;
 const RE_TDL_ERR = /^Error: (.+)$/;
 
 let session = null; // active or last finished session
+// tdl/gotd 的多行错误链：收齐后再 emit，避免只露出 "callback:" 这种包装行
+let pendingErr = null;
+let errFlushTimer = null;
 const listeners = new Set();
 let qrFlushTimer = null;
 
@@ -266,9 +269,42 @@ function analyzeLine(line) {
   }
   const mErr = line.match(RE_TDL_ERR);
   if (mErr) {
-    sess.error = mErr[1].slice(0, 300);
-    emitState();
+    // gotd/td 的错误是**多行链**，形如：
+    //   Error: callback:
+    //       github.com/gotd/td/telegram.(*Client).Run.func3
+    //           .../connect.go:180
+    //     - not authorized. please login first
+    // 真正的原因在**最后一行**（`- xxx`），第一行的 "callback:" 只是
+    // 包装层。此前只取第一行，等于把真正错误丢掉、只露一个 "callback:"，
+    // 让人完全无从判断。这里改为收集完整错误链，并提取最后一行实因。
+    pendingErr = { head: mErr[1].trim(), detail: '', lines: [line.trim()] };
     return;
+  }
+  // 正在收集错误链：缩进行/`- ` 行都属于同一条错误
+  if (pendingErr) {
+    const t = line.trim();
+    if (/^(-|\s+\S|\s*github\.com\/|\s*\.\.\.)/.test(line) || /^-\s+/.test(t)) {
+      pendingErr.lines.push(t);
+      const mDetail = t.match(/^-\s+(.+)$/);
+      if (mDetail) pendingErr.detail = mDetail[1].trim();
+      // 错误链通常紧跟若干行；给一个短定时器，收齐后一次性 emit
+      if (errFlushTimer) clearTimeout(errFlushTimer);
+      errFlushTimer = setTimeout(() => {
+        errFlushTimer = null;
+        if (!pendingErr) return;
+        const e = pendingErr; pendingErr = null;
+        // 优先用最后一行实因；没有再退回首行
+        sess.error = (e.detail || e.head).slice(0, 300);
+        sess.pushLog(`tdl 报错：${e.head}`);
+        for (const l of e.lines.slice(1)) sess.pushLog(`  ${l}`);
+        emitState();
+      }, 400);
+      return;
+    }
+    // 不是错误链的续行，先落盘再继续走正常逻辑
+    if (errFlushTimer) { clearTimeout(errFlushTimer); errFlushTimer = null; }
+    sess.error = (pendingErr.detail || pendingErr.head).slice(0, 300);
+    pendingErr = null;
   }
   if (line.includes('Scan QR code')) {
     sess.pushLog('等待扫码…');
