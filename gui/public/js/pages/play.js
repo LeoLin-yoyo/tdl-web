@@ -126,7 +126,33 @@ function setupPlayer(view) {
   const volEl = view.querySelector('#pl-vol');
   const fsBtn = view.querySelector('#pl-fs');
 
-  hud = { shell, video, poll: null, idx: -1, sid: '' };
+  hud = { shell, video, poll: null, idx: -1, sid: '', dl: null };
+
+  // 浏览器侧的真实接收速度。
+  //
+  // 右上角原先显示的 `netBps` 来自服务端，统计的是「服务器从 tdl serve 取到多少
+  // 字节」——那是服务器与 Telegram 之间的速度，跟数据送到这台电脑的快慢毫无关系。
+  // 两者可以差一个数量级（实测服务器侧 11~22 MB/s，而经隧道送到外网只有 1~3.5），
+  // 于是出现「界面显示缓冲飞快、眼前却一直卡」的错位。
+  //
+  // 这里改用浏览器自己的 `video.buffered` 增长量来估算真实送达速度：
+  // 它量的是「已经躺在这台机器上、随时可播」的字节，正是用户真正能感知的那一段。
+  const dlBytes = () => {
+    try {
+      let end = 0;
+      for (let i = 0; i < video.buffered.length; i++) end = Math.max(end, video.buffered.end(i));
+      return end;
+    } catch { return 0; }
+  };
+  const sampleDl = () => {
+    const t = dlBytes();
+    const now = Date.now();
+    const prev = hud.dl;
+    hud.dl = { t, at: now };
+    if (!prev || now - prev.at < 900 || t <= prev.t) return null;
+    // 秒 -> 字节/秒；缓冲区间可能因 seek 重置，故只在单调增长时采样
+    return Math.round((t - prev.t) / ((now - prev.at) / 1000));
+  };
 
   const setPlayIcon = () => {
     // The centre button is an overlay affordance only: while playing it fades
@@ -307,15 +333,27 @@ function startStatsPoll(sid, idx) {
         netEl.style.width = `${Math.min(100 - (curBytes / s.total) * 100, (ready / s.total) * 100)}%`;
       }
 
-      const rate = s.netBps ? `${fmtBytes(s.netBps)}/s` : '0 B/s';
       const ahead = Math.max(0, s.buffered - (s.cursor >= 0 ? s.cursor * 1048576 : 0));
       // While the picture is stalled say so plainly — a silent frozen frame
       // reads as "broken" even when the proxy is retrying the route.
       const stalled = video && !video.paused && video.readyState < 3;
+
+      // 两个速度各司其职，别再混为一谈：
+      //   「下载」= 这台电脑真正收到的速度（浏览器 buffered 增长量）
+      //   「服务器」= 服务器从 Telegram 取数的速度（仅作参考，不代表你能看到多快）
+      // 卡顿几乎总是前者远小于后者，把两个数并排摆出来，问题一眼可见。
+      const dl = sampleDl();
+      if (dl !== null) hud.lastDl = dl;
+      const dlRate = hud.lastDl;
+      const dlTxt = dlRate ? `下载 ${fmtBytes(dlRate)}/s` : '下载 —';
+      const srvTxt = s.netBps ? `服务器 ${fmtBytes(s.netBps)}/s` : '服务器 —';
+
       speedEl.textContent = stalled
-        ? `缓冲中 ${rate} · 领先 ${fmtBytes(ahead)}`
-        : `缓冲 ${rate}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
-      speedEl.classList.toggle('warn', stalled || (!!s.netBps && s.netBps < 4 * 1048576));
+        ? `缓冲中 · ${dlTxt} · ${srvTxt}`
+        : `${dlTxt} · ${srvTxt}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
+      // 告警条件也改用「真实送达速度」：服务器再快，送不到这台电脑就是卡。
+      // 4 MB/s 约合 32 Mbps，是 4K 顺畅播放的粗略下限。
+      speedEl.classList.toggle('warn', stalled || (!!dlRate && dlRate < 4 * 1048576));
     } catch { /* transient */ }
   };
   tick();
