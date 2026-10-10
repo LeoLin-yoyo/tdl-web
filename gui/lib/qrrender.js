@@ -1,94 +1,43 @@
-// 二维码渲染：把 tdl 输出的方块字符矩阵渲染成 PNG
+// 二维码渲染：把 tdl 输出的小方块字符矩阵渲染成 PNG
 //
-// 为什么需要它：
-//   tdl login --type qr 输出的是用 █ ▀ ▄ 等方块字符拼成的"字符画"，
-//   前端原本直接用 <pre> + 等宽字体显示。但方块字符能否正确显示，
-//   取决于**客户端浏览器**装了哪个等宽字体 —— 而字体栈里排前面的
-//   Cascadia Code / Consolas / JetBrains Mono 在 Linux 和手机上普遍缺失，
-//   回退到通用 monospace 后这些方块字符往往不再等宽，矩阵错位 → 二维码扫不出来。
+// ── 为什么需要它 ────────────────────────────────────────────────
+//   tdl login --type qr 用 github.com/skip2/go-qrcode 的
+//   `qr.ToSmallString(false)` 把二维码打成"字符画"输出到终端。
+//   前端原本用 <pre> + 等宽字体显示，但方块字符是否等宽取决于
+//   **客户端浏览器**装了哪个字体；字体缺失时矩阵错位 → 扫不出来。
+//   本模块在**服务端**把字符画还原成像素矩阵再渲染成 PNG，
+//   彻底摆脱客户端字体依赖。
 //
-//   本模块在**服务端**把字符画按"整格填色"的方式渲染成 PNG，
-//   彻底摆脱客户端字体依赖：任何浏览器、任何手机都能正确显示。
+// ── 关键：skip2 的输出是「反色」的 ──────────────────────────────
+//   库源码 qrcode.go 的 ToSmallString(inverseColor bool)：
+//     bitmap[y][x] 为 true 表示该像素是黑的（见 Bitmap() 文档）。
+//     循环里判断 `if bits[y][x] != inverseColor` 才走 if 分支。
+//   传入 inverseColor=false 时：bits=true(黑) != false 成立 → 走 if ；
+//   bits=false(白) 不成立 → 走 else。于是：
+//     上下相同 & 黑  → ' '  （空格）
+//     上下相同 & 白  → '█'
+//     上黑下白       → '▄'
+//     上白下黑       → '▀'
+//   **即：'█' 表示白、空格表示黑，整幅图是反色的。**
+//   照着"█=黑"去画会把二维码黑白颠倒，手机完全识别不了 —— 这正是
+//   之前「扫码毫无反应」的根因。
 //
-// 渲染方式说明（为什么不用字体画字）：
-//   直接画字符会在格与格之间留下亚像素灰缝，二维码的模块边界会糊。
-//   因此改为解析方块字符的**像素语义**，逐格填色 —— 无损、无缝隙：
-//     █ (U+2588) 整格黑     ▀ (U+2580) 上半格黑
-//     ▄ (U+2584) 下半格黑   ▒ (U+2592) 中灰（tdl 实际不用，兼容处理）
-//   这样一个字符 = 2×1 的像素格，与 tdl 的编码方式一致。
+//   （另外 Bitmap() 默认带 4 模块静区，所以 45 列 = 4 + 37 + 4，
+//     即版本 5 的二维码，渲染时不必再额外加静区。）
+//
+// ── 实现说明 ──────────────────────────────────────────────────
+//   逐字节还原的实际渲染放在同目录的 qrrender.py 里（独立文件），
+//   避免把 Python 脚本内嵌成 JS 模板字符串时的转义陷阱
+//   （`\\n` 之类容易出错，曾导致整幅图渲染不出来）。
+//   本模块只负责: 把矩阵喂给 python3，拿回 base64 PNG。
 
 const { execFile } = require('node:child_process');
+const path = require('node:path');
 
-const RENDER_SCRIPT = `
-import sys, json, base64, io
-from PIL import Image
-
-data = json.load(sys.stdin)
-text = data.get('text', '')
-cell = int(data.get('cell', 8))   # 每个"像素格"的边长
-
-lines = text.split('\\n')
-# 去掉首尾空行
-while lines and not lines[0].strip():
-    lines.pop(0)
-while lines and not lines[-1].strip():
-    lines.pop()
-if not lines:
-    print(json.dumps({'error': 'empty'}))
-    sys.exit(0)
-
-cols = max(len(l) for l in lines)
-rows = len(lines)
-
-# 每个字符纵向代表 2 个像素格
-W = cols * cell
-H = rows * cell * 2
-
-img = Image.new('L', (W, H), 255)   # 灰度，白底
-px = img.load()
-
-FULL  = '\\u2588'   # 整格
-UPPER = '\\u2580'   # 上半格
-LOWER = '\\u2584'   # 下半格
-MED   = '\\u2592'   # 中灰
-SPACE = ' '
-
-def fill(x0, y0, x1, y1):
-    for yy in range(y0, y1):
-        for xx in range(x0, x1):
-            px[xx, yy] = 0
-
-for r, line in enumerate(lines):
-    for c, chr_ in enumerate(line):
-        x0 = c * cell
-        y_mid = r * cell * 2 + cell
-        y_top = r * cell * 2
-        y_bot = r * cell * 2 + cell * 2
-        if chr_ == FULL:
-            fill(x0, y_top, x0 + cell, y_bot)
-        elif chr_ == UPPER:
-            fill(x0, y_top, x0 + cell, y_mid)
-        elif chr_ == LOWER:
-            fill(x0, y_mid, x0 + cell, y_bot)
-        elif chr_ == MED:
-            # 中灰：用点阵表示，用于少量场景
-            for yy in range(y_top, y_bot, 2):
-                for xx in range(x0, x0 + cell, 2):
-                    px[xx, yy] = 0
-        # 空格与其它字符视为白
-
-# 加白边（静区），提升识别率
-border = cell * 2
-out = Image.new('L', (W + border * 2, H + border * 2), 255)
-out.paste(img, (border, border))
-
-buf = io.BytesIO()
-out.save(buf, format='PNG', optimize=True)
-print(json.dumps({'png': base64.b64encode(buf.getvalue()).decode()}))
-`;
+const PY_SCRIPT = path.join(__dirname, 'qrrender.py');
 
 /**
- * 把 tdl 的方块字符矩阵渲染为 PNG（base64）
+ * 把 tdl 的小方块字符矩阵渲染为 PNG（base64）
  * @param {string} text  方块字符矩阵
  * @param {number} cell  每像素格边长（默认 8）
  * @returns {Promise<string|null>}
@@ -98,7 +47,7 @@ function renderQrPng(text, cell = 8) {
     if (!text || typeof text !== 'string') return resolve(null);
     let child;
     try {
-      child = execFile('python3', ['-c', RENDER_SCRIPT], { timeout: 15000 }, (err, stdout) => {
+      child = execFile('python3', [PY_SCRIPT], { timeout: 15000 }, (err, stdout) => {
         if (err) return resolve(null);
         try {
           const out = JSON.parse(stdout);
