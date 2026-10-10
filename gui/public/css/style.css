@@ -283,6 +283,12 @@ details.adv .adv-body { padding-top: 10px; }
   font-variant-ligatures: none;
   font-kerning: none;
   -webkit-font-smoothing: none;
+  /* 字符画是反色的（tdl 用 skip2/go-qrcode 的 ToSmallString(false)，
+     '█' 代表白、空格代表黑），且深色主题下字符会继承浅色 → 用
+     反色滤镜把它翻正并固定为白底黑块，否则这层后备图同样扫不出来。 */
+  filter: invert(1);
+  background: #fff;
+  color: #000;
   background: #fff; color: #000; padding: 10px; border-radius: 8px; display: inline-block;
   user-select: all; white-space: pre; margin: 0 auto;
   max-width: 100%; overflow-x: auto;
