@@ -139,6 +139,10 @@
           .then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); })
           .then(function (res) {
             if (res.status === 200 && res.data.ok) {
+              // 保存服务端下发的 CSRF 令牌，供进入主应用后的写操作使用
+              try {
+                if (res.data.csrf) sessionStorage.setItem('csrf', res.data.csrf);
+              } catch (e) { /* 隐私模式下可能失败，主应用会再取一次 */ }
               show('登录成功，正在进入…', 'ok');
               location.replace('/');
               return;

@@ -67,10 +67,41 @@ export const STATUS_NAME = {
 
 // ---- api ------------------------------------------------------------------
 
+// CSRF 令牌：服务端对写操作（非 GET/HEAD）校验双提交令牌，
+// 前端必须带上，否则一律 403。登录成功后由 /api/auth/login 返回并缓存于此。
+let csrfToken = '';
+
+export function setCsrfToken(t) {
+  csrfToken = t || '';
+}
+
+export function getCsrfToken() {
+  return csrfToken;
+}
+
+// 启动时先向服务端要一次令牌（已登录的情况下 /api/auth/status 会返回）
+export async function initCsrf() {
+  try {
+    const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
+    const data = await res.json();
+    if (data && data.csrf) csrfToken = data.csrf;
+  } catch { /* 未登录或网络异常，保持空值 */ }
+  return csrfToken;
+}
+
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
 export async function api(path, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  // 写操作补上 CSRF 头
+  if (!SAFE_METHODS.includes(method) && csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     ...opts,
+    headers,
     body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
   });
   let data = {};
@@ -187,6 +218,9 @@ window.addEventListener('hashchange', navigate);
 
 export async function boot() {
   if (typeof window !== 'undefined') window.__store = store; // debug handle
+  // 先取 CSRF 令牌：服务端对写操作校验双提交令牌，
+  // 不先拿到它，扫码登录等所有写操作都会 403。
+  await initCsrf();
   connectSSE();
   await Promise.all([loadStatus(), loadTasks()]);
   // account chip reflects login state
