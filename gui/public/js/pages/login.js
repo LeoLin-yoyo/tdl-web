@@ -94,10 +94,23 @@ async function render(view) {
     if (l.state === 'starting') {
       stateBox.innerHTML = `<div class="empty"><span class="spin">◐</span> 正在启动 tdl 并连接 Telegram…</div>`;
     } else if (l.state === 'qr') {
+      // 二维码优先后端渲染的 PNG：方块字符靠客户端等宽字体显示时，
+      // 字体缺失会导致矩阵错位、扫码失败；PNG 则与客户端字体无关。
+      // 缓存键用 qrText 的简单哈希：内容变化（tdl 刷新二维码）时 URL 随之改变，
+      // 避免浏览器复用旧图。
+      const qrKey = l.qrText
+        ? l.qrText.length + '_' + l.qrText.charCodeAt(0) + '_' + (l.qrText.charCodeAt(l.qrText.length - 1) || 0)
+        : '';
+      const qrBlock = l.qrText
+        ? `<img class="qr-img" src="/api/login/qr.png?v=${qrKey}"
+                alt="登录二维码"
+                onerror="this.style.display='none';this.nextElementSibling.style.display='inline-block';">
+           <pre class="qr-pre" style="display:none">${esc(l.qrText)}</pre>`
+        : '';
       stateBox.innerHTML = `
         <div style="text-align:center">
           <div class="muted small" style="margin-bottom:10px">用 Telegram App 扫描二维码<br>（Settings → Devices → Link Desktop Device）</div>
-          <pre class="qr-pre">${esc(l.qrText || '')}</pre>
+          ${qrBlock}
           <div class="muted small" style="margin-top:10px">二维码过期会自动刷新</div>
         </div>`;
     } else if (l.state === 'password') {

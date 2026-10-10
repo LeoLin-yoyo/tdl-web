@@ -263,10 +263,29 @@ details.adv .adv-body { padding-top: 10px; }
 .modal-body { padding: 16px 18px; overflow-y: auto; }
 .modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; }
 
+/* 后端渲染的二维码图片：与客户端字体无关，任何设备都能正确显示 */
+.qr-img {
+  width: 260px; max-width: 78vw; height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #fff; padding: 8px; border-radius: 8px;
+  display: inline-block;
+}
+/* 二维码：由 █ ▀ ▄ 等方块字符拼成，必须严格等宽 + 行高紧凑，否则矩阵错位扫不出来。
+   原字体栈以 Cascadia Code / Consolas / JetBrains Mono 打头，这些在 Linux 与手机上
+   普遍缺失，回退到 monospace 后方块字符往往不等宽 → 二维码扭曲。故显式补齐
+   DejaVu Sans Mono（Linux 常见且方块字符等宽）与 Noto Sans Mono 等跨平台字体。
+   注：正常路径走 .qr-img 图片，此处仅作图片加载失败时的后备。 */
 .qr-pre {
-  font-family: var(--mono); font-size: 6.5px; line-height: 1.05; letter-spacing: 0;
+  font-family: "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono",
+               "Menlo", "Consolas", "Courier New", monospace;
+  font-size: 8px; line-height: 1; letter-spacing: 0;
+  font-variant-ligatures: none;
+  font-kerning: none;
+  -webkit-font-smoothing: none;
   background: #fff; color: #000; padding: 10px; border-radius: 8px; display: inline-block;
   user-select: all; white-space: pre; margin: 0 auto;
+  max-width: 100%; overflow-x: auto;
 }
 .chat-pick { max-height: 380px; overflow-y: auto; }
 .chat-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; }

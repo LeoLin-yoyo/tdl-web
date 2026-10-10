@@ -16,6 +16,7 @@ const db = require('./lib/db');
 const stream = require('./lib/stream');
 const tdlfetch = require('./lib/tdlfetch');
 const auth = require('./lib/auth');
+const qrrender = require('./lib/qrrender');
 
 // 首次启动：若库里尚无管理员账号，尝试用环境变量引导创建
 auth.bootstrapFromEnv();
@@ -308,6 +309,27 @@ async function api(req, res, pathname, searchParams) {
   if (method === 'GET' && p === '/api/login') {
     return sendJson(res, 200, login.publicState());
   }
+  // 二维码图片：服务端把 tdl 的方块字符矩阵渲染成 PNG，
+  // 避免依赖客户端等宽字体（字体缺失会导致矩阵错位、扫不出来）
+  if (method === 'GET' && p === '/api/login/qr.png') {
+    const st = login.publicState();
+    if (!st || !st.qrText) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('no qr');
+    }
+    const png = await qrrender.renderQrPng(st.qrText, 6);
+    if (!png) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('render failed');
+    }
+    const buf = Buffer.from(png, 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': buf.length,
+      'Cache-Control': 'no-store',
+    });
+    return res.end(buf);
+  }
   if (method === 'POST' && p === '/api/login/verify') {
     // re-check the remembered session against tdl (used by the login page)
     const st = await login.detectLogin({ force: searchParams.get('force') === '1' });
@@ -427,9 +449,11 @@ const server = http.createServer((req, res) => {
   // 逻辑：/api/* 未登录返回 401 JSON；页面请求未登录则跳转登录页。
   // 登录接口与登录页自身放行（见 lib/auth.js 的 PUBLIC_PATHS）。
   const isApi = pathname.startsWith('/api/');
-  const isLoginPage = pathname === '/login.html';
+  // 登录页及其所需静态资源需放行（见 auth.isPublicStatic），
+  // 否则未登录时样式/脚本被拦，登录页无法正常工作。
+  const isPublicAsset = auth.isPublicStatic(pathname);
 
-  if (!isLoginPage) {
+  if (!isPublicAsset) {
     const denied = auth.guard(req, res, pathname, req.method || 'GET');
     if (denied) {
       if (isApi) {

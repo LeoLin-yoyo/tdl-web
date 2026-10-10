@@ -218,6 +218,24 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/logout',
 ]);
 
+// 登录页自身所需的静态资源必须放行，否则未登录时样式与脚本加载被拦，
+// 登录页会退化成裸 HTML 且表单脚本失效（等于登不进去）。
+// 注意：这里只放行登录页用到的通用资源与登录页专属脚本，
+// 不放行任何业务接口或业务页面。
+const PUBLIC_STATIC_PREFIXES = [
+  '/css/',        // 样式表（登录页与主应用共用，本身不含敏感数据）
+  '/js/auth.js',  // 登录页逻辑
+  '/favicon',     // 图标
+];
+
+function isPublicStatic(pathname) {
+  if (pathname === '/login.html') return true;
+  for (const p of PUBLIC_STATIC_PREFIXES) {
+    if (pathname === p || pathname.startsWith(p)) return true;
+  }
+  return false;
+}
+
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 // 解析 Cookie 头
@@ -273,6 +291,7 @@ function isSecureRequest(req) {
 // 门禁：返回 null 表示放行；返回对象表示应拦截并回写响应
 function guard(req, res, pathname, method) {
   if (PUBLIC_PATHS.has(pathname)) return null;
+  if (isPublicStatic(pathname)) return null;
 
   const cookies = parseCookies(req);
   const token = cookies[sessionCookieName()];
@@ -301,6 +320,6 @@ module.exports = {
   issueSession, verifySession, revokeAllSessions, csrfTokenFor, verifyCsrf,
   clientIp, isLockedOut, recordFail, clearFails,
   sessionCookieName, buildSessionCookie, buildLogoutCookie, isSecureRequest,
-  parseCookies, guard,
+  parseCookies, guard, isPublicStatic,
   SESSION_TTL_MS, MAX_FAILS, LOCKOUT_MS,
 };
