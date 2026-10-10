@@ -69,6 +69,27 @@ function verifyPassword(password) {
   return safeEqual(derived.toString('hex'), acc.hash);
 }
 
+// 校验用户名是否就是已设置的那个管理员账号。
+//
+// 此前 server.js 只做了 `username.length > 0` —— 等于「用户名非空就放行」，
+// 于是任何用户名配正确密码都能登录（实测 admin / 随便什么 / xxx 全部 200），
+// 密码校验再严密也形同虚设。这里按真实账号比对，并用恒定时间比较避免
+// 通过响应时间逐字符猜用户名。
+function verifyUsername(username) {
+  const acc = getAccount();
+  const want = (acc && acc.username) || '';
+  if (!want) return false;
+  const got = String(username == null ? '' : username).trim();
+  if (!got) return false;
+  return safeEqual(got, want);
+}
+
+// 已设置的管理员用户名（签发会话时用它，避免把用户输入的原样存进令牌）
+function accountUsername() {
+  const acc = getAccount();
+  return (acc && acc.username) || '';
+}
+
 // 设置（或重设）管理员账号
 function setAccount(username, password) {
   const u = String(username || '').trim();
@@ -316,7 +337,7 @@ function guard(req, res, pathname, method) {
 }
 
 module.exports = {
-  isConfigured, setAccount, verifyPassword, bootstrapFromEnv,
+  isConfigured, setAccount, verifyUsername, verifyPassword, accountUsername, bootstrapFromEnv,
   issueSession, verifySession, revokeAllSessions, csrfTokenFor, verifyCsrf,
   clientIp, isLockedOut, recordFail, clearFails,
   sessionCookieName, buildSessionCookie, buildLogoutCookie, isSecureRequest,

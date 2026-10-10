@@ -179,9 +179,12 @@ async function api(req, res, pathname, searchParams) {
     const body = await readBody(req);
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
-    // 用户名与密码都校验，但对外统一报“用户名或密码错误”，不泄露哪个错了
-    const okUser = username.length > 0;
-    const okPass = okUser ? auth.verifyPassword(password) : false;
+    // 用户名与密码都校验，但对外统一报“用户名或密码错误”，不泄露哪个错了。
+    // 注意：用户名必须与库里已设置的管理员账号严格比对 —— 早先这里只判了
+    // `username.length > 0`，等于「非空即通过」，于是 admin / 任意字符串
+    // 配上正确密码都能登录，密码校验形同虚设。
+    const okUser = auth.verifyUsername(username);
+    const okPass = auth.verifyPassword(password);
     if (!okUser || !okPass) {
       const rec = auth.recordFail(ip);
       const left = Math.max(0, auth.MAX_FAILS - rec.count);
@@ -191,7 +194,8 @@ async function api(req, res, pathname, searchParams) {
       });
     }
     auth.clearFails(ip);
-    const { token, exp } = auth.issueSession(username);
+    // 会话里记录的是真实的账号名，而不是用户随便填的字符串
+    const { token, exp } = auth.issueSession(auth.accountUsername());
     const secure = auth.isSecureRequest(req);
     res.setHeader('Set-Cookie', auth.buildSessionCookie(token, exp, secure));
     return sendJson(res, 200, {
