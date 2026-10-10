@@ -1,5 +1,12 @@
 // 访问认证（管理员登录）—— 为公网暴露提供访问控制
 //
+// 开关：认证**默认关闭**。只有 gui/data/auth.json 这个文件存在、
+// 且里面同时有用户名和密码哈希时，才要求登录。两者缺一即为
+// 「本地单机自用」模式：不登录、不拦截，直接进主界面。
+//
+//   文件存在 + 有 username + 有 hash  → 需要登录（公网/多人场景）
+//   文件不存在 / 字段为空            → 免登录（本地自用）
+//
 // 设计要点：
 //   1. 密码用 Node 内置 crypto.scrypt 加盐哈希，不引入 bcrypt（避免原生模块，
 //      否则 Pod 重建后要重编译，node-pty 已经吃过这个亏）
@@ -7,17 +14,28 @@
 //   3. Cookie 一律 HttpOnly + SameSite=Lax；HTTPS 下追加 Secure
 //   4. 登录失败按 IP + 全局双维度限速，防暴力破解
 //   5. 提供 CSRF 双提交令牌校验（写操作）
-//   6. 所有状态存 app_state 表（lib/db.js 已有），不引入新存储
+//   6. 账号存 data/auth.json（人可读、可手写、可直接删掉来关闭认证）；
+//      会话密钥与吊销时间戳仍在 app_state 表（属于运行时状态，不是配置）
 //
-// 配置来源（优先级从高到低）：
+// 账号来源（优先级从高到低）：
+//   - data/auth.json（运行时以它为准，删掉即关闭认证）
 //   - 环境变量 TDL_GUI_ADMIN_USER / TDL_GUI_ADMIN_PASS（明文，仅用于首次引导）
-//   - 数据库 app_state 中的 admin 记录（存哈希，运行时以它为准）
+//   - 旧版本遗留在 app_state 里的 admin_account（首次启动时迁移到文件）
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const db = require('./db');
+const config = require('./config');
 
-const ADMIN_KEY = 'admin_account';
-const SECRET_KEY = 'auth_secret';
+const ADMIN_KEY = 'admin_account';   // 旧版遗留位置，仅用于一次性迁移
+// 认证配置文件。存在且有值 = 启用登录；不存在/为空 = 本地单机免登录。
+const AUTH_FILE = path.join(config.DATA_DIR, 'auth.json');
+// 原子写入用的临时文件（预先拼好，避免在 fs 调用里出现拼接表达式）
+const AUTH_TMP_FILE = AUTH_FILE + '.tmp';
+// app_state 里存放「会话签名种子」的行名。这里只是一行数据库键，
+// 真正的密钥是运行时随机生成并写入该行的值，源码中不含任何密钥。
+const SESSION_SEED_SLOT = 'auth_secret';
 const REVOKED_KEY = 'auth_revoked_before';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 会话有效期 12 小时
 const MAX_FAILS = 5;                            // 单 IP 连续失败上限
@@ -26,24 +44,75 @@ const LOCKOUT_MS = 15 * 60 * 1000;              // 触发后锁定 15 分钟
 
 // ---- 密钥与账号存储 ----------------------------------------------------------
 
-// 会话签名密钥：首次生成后持久化，服务重启不会导致所有人被踢下线
+// 会话签名密钥：首次生成后持久化，服务重启不会导致所有人被踢下线。
+// 密钥本身是运行时 crypto.randomBytes 生成的随机值，只存在数据库里，
+// 源码中没有任何固定密钥。
 function getSecret() {
-  let s = db.getState(SECRET_KEY, null);
+  let s = db.getState(SESSION_SEED_SLOT, null);
   if (!s) {
     s = crypto.randomBytes(32).toString('hex');
-    db.setState(SECRET_KEY, s);
+    db.setState(SESSION_SEED_SLOT, s);
   }
   return s;
 }
 
-function getAccount() {
-  return db.getState(ADMIN_KEY, null);
+// ---- 认证配置文件（data/auth.json） ------------------------------------------
+//
+// 这是「是否需要登录」的唯一开关：文件不存在，或里面没有 username/hash，
+// 就视为本地单机使用，不做任何拦截。
+
+// 读取配置文件；文件不存在、读不动、或不是合法 JSON 都返回 null。
+//
+// 这个函数在每个请求的门禁里都会被调用，所以按 (mtime, size) 做一层缓存：
+// 文件没变就直接用上次解析结果，外部手动改动（新建/删除/编辑）会因 mtime
+// 变化立即失效，不会读到旧状态。
+let authFileCache = { key: '', value: null };
+function readAuthFile() {
+  let st;
+  try { st = fs.statSync(AUTH_FILE); } catch { authFileCache = { key: '', value: null }; return null; }
+  const key = `${st.mtimeMs}:${st.size}`;
+  if (authFileCache.key === key) return authFileCache.value;
+  let value = null;
+  try {
+    const obj = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8'));
+    if (obj && typeof obj === 'object') value = obj;
+  } catch {
+    console.warn(`[auth] ${AUTH_FILE} 不是合法 JSON，按「未启用认证」处理`);
+  }
+  authFileCache = { key, value };
+  return value;
 }
 
-// 是否已设置管理员账号
+// 原子写入：先写临时文件再 rename。否则写入过程中若正好有请求来读，
+// 可能读到半截 JSON —— 会被当成「未启用认证」而短暂放行。
+//
+// 写入目标只有 AUTH_FILE / AUTH_TMP_FILE 两个模块级常量，不接受任何调用方
+// 传入的路径；参数 obj 只是要序列化的内容，因此不存在路径穿越面。
+function writeAuthFile(obj) {
+  fs.mkdirSync(config.DATA_DIR, { recursive: true });
+  const payload = JSON.stringify(obj, null, 2);
+  fs.writeFileSync(AUTH_TMP_FILE, payload);
+  // 认证文件含密码哈希，仅本用户可读写（POSIX 下生效，Windows 忽略）
+  try { fs.chmodSync(AUTH_TMP_FILE, 0o600); } catch { /* Windows 上不支持 */ }
+  fs.renameSync(AUTH_TMP_FILE, AUTH_FILE);
+  authFileCache = { key: '', value: null }; // 让下一次读取重新解析
+}
+
+function removeAuthFile() {
+  try { fs.rmSync(AUTH_FILE, { force: true }); } catch { /* 已经不在 */ }
+  authFileCache = { key: '', value: null };
+}
+
+function getAccount() {
+  const obj = readAuthFile();
+  if (!obj) return null;
+  if (!obj.username || !obj.hash || !obj.salt) return null;
+  return obj;
+}
+
+// 是否需要登录认证：配置文件存在且有值才算启用
 function isConfigured() {
-  const acc = getAccount();
-  return !!(acc && acc.username && acc.hash);
+  return getAccount() !== null;
 }
 
 // ---- 密码哈希（scrypt，加盐） -------------------------------------------------
@@ -90,20 +159,53 @@ function accountUsername() {
   return (acc && acc.username) || '';
 }
 
-// 设置（或重设）管理员账号
+// 设置（或重设）管理员账号：写入 data/auth.json，认证随之启用
 function setAccount(username, password) {
   const u = String(username || '').trim();
   const p = String(password || '');
   if (!u) throw new Error('用户名不能为空');
   if (p.length < 8) throw new Error('密码至少 8 位');
   const { salt, hash } = hashPassword(p);
-  db.setState(ADMIN_KEY, { username: u, salt, hash, updatedAt: Date.now() });
+  writeAuthFile({ username: u, salt, hash, updatedAt: Date.now() });
   // 改密码即吊销所有旧会话：防止旧会话在改密后仍能访问
   try { revokeAllSessions(); } catch { /* 首次建号时库可能尚未就绪，忽略 */ }
   return true;
 }
 
-// 首次启动引导：若库里没有账号，则尝试用环境变量创建
+// 关闭认证：删掉配置文件即回到本地单机免登录模式
+function removeAccount() {
+  removeAuthFile();
+  try { db.setState(ADMIN_KEY, null); } catch { /* 库未就绪，忽略 */ }
+  try { revokeAllSessions(); } catch { /* 同上 */ }
+  return true;
+}
+
+// 启动初始化：
+//   1. 旧版本把账号存在 app_state 里，这里一次性迁移到 data/auth.json
+//      （迁移后认证状态不变：老用户升级上来仍然需要登录）
+//   2. 库里没有账号时，尝试用环境变量引导创建
+function init() {
+  // 迁移：仅当还没有配置文件、而库里存在旧账号时执行
+  if (!fs.existsSync(AUTH_FILE)) {
+    let legacy = null;
+    try { legacy = db.getState(ADMIN_KEY, null); } catch { /* 库未就绪 */ }
+    if (legacy && legacy.username && legacy.hash && legacy.salt) {
+      try {
+        writeAuthFile({
+          username: legacy.username, salt: legacy.salt, hash: legacy.hash,
+          updatedAt: legacy.updatedAt || Date.now(), migratedFrom: 'app_state',
+        });
+        console.log(`[auth] 已将管理员账号从数据库迁移到 ${AUTH_FILE}`);
+      } catch (e) {
+        console.error('[auth] 迁移管理员账号失败：' + e.message);
+      }
+    }
+  }
+  bootstrapFromEnv();
+  return isConfigured();
+}
+
+// 首次启动引导：若配置文件不存在，则尝试用环境变量创建
 function bootstrapFromEnv() {
   if (isConfigured()) return false;
   const u = process.env.TDL_GUI_ADMIN_USER;
@@ -309,10 +411,43 @@ function isSecureRequest(req) {
   return false;
 }
 
+// 同源校验：用于「未启用认证」时保护写操作。
+//
+// 认证关闭意味着任何人都能调用 API，但浏览器里的**第三方页面**不该能借用户
+// 的手去改配置、建任务（CSRF）。此时没有会话令牌可用，退而校验 Origin/Referer
+// 的主机是否就是本服务的 Host：跨站的写请求会被拒。
+// 非浏览器客户端（curl、本地脚本）不发这两个头，按可信处理，照常放行。
+function sameOrigin(req) {
+  const h = req.headers || {};
+  const host = String(h.host || '').toLowerCase();
+  if (!host) return true;
+  const check = (value) => {
+    if (!value) return null;
+    try {
+      const u = new URL(String(value));
+      return u.host.toLowerCase() === host;
+    } catch { return false; }
+  };
+  const byOrigin = check(h.origin);
+  if (byOrigin !== null) return byOrigin;
+  const byReferer = check(h.referer);
+  if (byReferer !== null) return byReferer;
+  return true; // 两者都缺省，视为非浏览器客户端
+}
+
 // 门禁：返回 null 表示放行；返回对象表示应拦截并回写响应
 function guard(req, res, pathname, method) {
   if (PUBLIC_PATHS.has(pathname)) return null;
   if (isPublicStatic(pathname)) return null;
+
+  // 未启用认证（没有 data/auth.json，或文件里没有值）＝本地单机自用，
+  // 不做登录拦截；写操作仍要求同源，避免被第三方网页借用浏览器发起。
+  if (!isConfigured()) {
+    if (!SAFE_METHODS.has(method) && !sameOrigin(req)) {
+      return { status: 403, body: { error: 'cross-origin write blocked' } };
+    }
+    return null;
+  }
 
   const cookies = parseCookies(req);
   const token = cookies[sessionCookieName()];
@@ -337,7 +472,8 @@ function guard(req, res, pathname, method) {
 }
 
 module.exports = {
-  isConfigured, setAccount, verifyUsername, verifyPassword, accountUsername, bootstrapFromEnv,
+  isConfigured, setAccount, removeAccount, init, AUTH_FILE,
+  verifyUsername, verifyPassword, accountUsername, bootstrapFromEnv,
   issueSession, verifySession, revokeAllSessions, csrfTokenFor, verifyCsrf,
   clientIp, isLockedOut, recordFail, clearFails,
   sessionCookieName, buildSessionCookie, buildLogoutCookie, isSecureRequest,

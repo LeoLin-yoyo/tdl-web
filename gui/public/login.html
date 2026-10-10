@@ -107,11 +107,13 @@
       }
       function hide() { msg.className = 'msg'; }
 
-      // 已配置但未登录时正常显示；未配置则给明确提示
+      // 未启用认证时无需登录，直接回主界面；已配置但未登录时正常显示
       fetch('/api/auth/status', { credentials: 'same-origin' })
         .then(function (r) { return r.json(); })
         .then(function (s) {
           if (s.authenticated) { location.replace('/'); return; }
+          // required 为假 = 本地单机自用，不拦截，直接进主界面
+          if (s.required === false) { location.replace('/'); return; }
           if (!s.configured) {
             show('管理员账号尚未设置。请先设置账号后再登录。', 'err');
             btn.disabled = true;

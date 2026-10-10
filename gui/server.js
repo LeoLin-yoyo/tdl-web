@@ -18,8 +18,9 @@ const tdlfetch = require('./lib/tdlfetch');
 const auth = require('./lib/auth');
 const qrrender = require('./lib/qrrender');
 
-// 首次启动：若库里尚无管理员账号，尝试用环境变量引导创建
-auth.bootstrapFromEnv();
+// 认证初始化：迁移旧账号 / 按环境变量引导建号。
+// 返回是否需要登录 —— 只有 data/auth.json 存在且有值时才需要（见 lib/auth.js）。
+const authRequired = auth.init();
 
 // In-flight auto-download state, polled by the settings page.
 let tdlFetchJob = null;
@@ -206,12 +207,57 @@ async function api(req, res, pathname, searchParams) {
     const cookies = auth.parseCookies(req);
     const token = cookies[auth.sessionCookieName()];
     const v = auth.verifySession(token);
+    // required = 是否需要登录（即认证是否已启用）。未启用时前端直接放行进主界面。
+    const required = auth.isConfigured();
     return sendJson(res, 200, {
-      configured: auth.isConfigured(),
-      authenticated: v.ok,
+      required,
+      configured: required,
+      authenticated: required ? v.ok : true,
       username: v.ok ? v.username : null,
       csrf: v.ok ? auth.csrfTokenFor(token) : null,
     });
+  }
+
+  // 启用认证：未启用时任何人可调用（本地自用场景下由设置页触发）；
+  // 已启用后只允许已登录的管理员改密码。
+  if (method === 'POST' && p === '/api/auth/setup') {
+    if (auth.isConfigured()) {
+      const token = auth.parseCookies(req)[auth.sessionCookieName()];
+      if (!auth.verifySession(token).ok) {
+        return sendJson(res, 401, { error: 'unauthorized', message: '已启用认证，请先登录' });
+      }
+    }
+    const body = await readBody(req);
+    try {
+      auth.setAccount(body.username, body.password);
+    } catch (e) {
+      return sendJson(res, 400, { error: 'invalid', message: String(e.message || e) });
+    }
+    // 建号即吊销旧会话，并直接给当前请求签发新会话，省去再登一次
+    const { token, exp } = auth.issueSession(auth.accountUsername());
+    const secure = auth.isSecureRequest(req);
+    res.setHeader('Set-Cookie', auth.buildSessionCookie(token, exp, secure));
+    return sendJson(res, 200, {
+      ok: true,
+      required: true,
+      username: auth.accountUsername(),
+      csrf: auth.csrfTokenFor(token),
+      expiresAt: exp,
+    });
+  }
+
+  // 关闭认证：删掉 data/auth.json，回到本地单机免登录模式（需已登录）
+  if (method === 'POST' && p === '/api/auth/disable') {
+    if (auth.isConfigured()) {
+      const token = auth.parseCookies(req)[auth.sessionCookieName()];
+      if (!auth.verifySession(token).ok) {
+        return sendJson(res, 401, { error: 'unauthorized', message: '请先登录再关闭认证' });
+      }
+    }
+    auth.removeAccount();
+    const secure = auth.isSecureRequest(req);
+    res.setHeader('Set-Cookie', auth.buildLogoutCookie(secure));
+    return sendJson(res, 200, { ok: true, required: false });
   }
 
   if (method === 'POST' && p === '/api/auth/login') {
@@ -556,6 +602,12 @@ server.listen(PORT, HOST, () => {
   console.log(`  tdl:  ${global.TDL_PATH}`);
   console.log(`  代理: ${cfg.proxy || '（未设置，请在设置页配置）'}`);
   console.log(`  下载目录: ${cfg.dir}`);
+  if (authRequired) {
+    console.log(`  访问认证: 已启用（账号文件 ${auth.AUTH_FILE}）`);
+  } else {
+    console.log('  访问认证: 未启用 —— 本地单机模式，直接访问无需登录');
+    console.log('           如需公网/多人使用，在设置页启用，或放好 data/auth.json');
+  }
   console.log('==============================================');
 });
 

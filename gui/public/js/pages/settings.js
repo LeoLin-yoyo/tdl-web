@@ -1,6 +1,6 @@
 // Settings: proxy / ns / dir / perf defaults, server info.
 
-import { api, esc, store, registerRoute, toast, fmtTime } from '../app.js';
+import { api, esc, store, registerRoute, toast, fmtTime, setCsrfToken } from '../app.js';
 
 async function render(view) {
   const cfg = store.config || {};
@@ -111,6 +111,12 @@ async function render(view) {
     </div>
 
     <div class="card">
+      <h2>访问认证</h2>
+      <div class="hint muted small" style="margin-bottom:12px" id="auth-state">检测中…</div>
+      <div id="auth-body"></div>
+    </div>
+
+    <div class="card">
       <h2>关于</h2>
       <div class="muted small" style="line-height:2.1">
         tdl 版本 <b style="color:var(--text)">${esc(store.version || '…')}</b>（CLI 单文件，GUI 不修改它）<br>
@@ -217,6 +223,74 @@ async function render(view) {
     takeout: view.querySelector('#s-takeout').checked,
     desc: view.querySelector('#s-desc').checked,
   }, view.querySelector('#s-save-dl'));
+
+  // ---- 访问认证开关 --------------------------------------------------------
+  // 未启用：显示启用表单；已启用：显示关闭按钮。
+  // 判定以后端 /api/auth/status 为准（文件在不在），而不是本地猜测。
+  const authState = view.querySelector('#auth-state');
+  const authBody = view.querySelector('#auth-body');
+
+  function renderAuthForm() {
+    authState.innerHTML = '当前<strong style="color:var(--text)">未启用</strong>：本地单机使用，打开网页即用，无需登录。'
+      + '填入用户名和密码即可启用（适合公网/多人访问）。';
+    authBody.innerHTML = `
+      <div class="grid c2">
+        <div class="field"><label>管理员用户名</label>
+          <input type="text" id="a-user" autocomplete="username" spellcheck="false" placeholder="admin"></div>
+        <div class="field"><label>密码（至少 8 位）</label>
+          <input type="password" id="a-pass" autocomplete="new-password" placeholder="••••••••"></div>
+      </div>
+      <button class="btn primary" id="a-enable">启用访问认证</button>
+      <span class="hint muted small" style="margin-left:8px">启用后立即要求登录；账号写入 gui/data/auth.json</span>`;
+    authBody.querySelector('#a-enable').onclick = async () => {
+      const btn = authBody.querySelector('#a-enable');
+      const username = authBody.querySelector('#a-user').value.trim();
+      const password = authBody.querySelector('#a-pass').value;
+      if (!username || !password) { toast('请填写用户名和密码', 'error'); return; }
+      if (password.length < 8) { toast('密码至少 8 位', 'error'); return; }
+      btn.disabled = true;
+      try {
+        const r = await api('/api/auth/setup', { method: 'POST', body: { username, password } });
+        if (r && r.csrf) setCsrfToken(r.csrf);
+        toast('已启用访问认证，下次访问需登录', 'ok');
+        renderAuthEnabled(r.username || username);
+      } catch (e) {
+        toast(e.message, 'error');
+        btn.disabled = false;
+      }
+    };
+  }
+
+  function renderAuthEnabled(username) {
+    authState.innerHTML = `当前<strong style="color:var(--text)">已启用</strong>：访问需登录`
+      + (username ? `（管理员：${esc(username)}）` : '') + '。';
+    authBody.innerHTML = `
+      <div class="hint muted small" style="margin-bottom:10px">
+        关闭后删除 gui/data/auth.json，回到本地单机免登录模式，当前浏览器也不再要求登录。
+      </div>
+      <button class="btn" id="a-disable">关闭访问认证</button>`;
+    authBody.querySelector('#a-disable').onclick = async () => {
+      if (!confirm('确定关闭访问认证？关闭后任何人访问本机地址都无需登录。')) return;
+      const btn = authBody.querySelector('#a-disable');
+      btn.disabled = true;
+      try {
+        await api('/api/auth/disable', { method: 'POST', body: {} });
+        toast('已关闭访问认证', 'ok');
+        renderAuthForm();
+      } catch (e) {
+        toast(e.message, 'error');
+        btn.disabled = false;
+      }
+    };
+  }
+
+  try {
+    const st = await api('/api/auth/status');
+    if (st.required) renderAuthEnabled(st.username);
+    else renderAuthForm();
+  } catch {
+    authState.textContent = '状态获取失败，请刷新页面重试。';
+  }
 }
 
 registerRoute('/settings', { title: '设置', render });

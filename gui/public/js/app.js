@@ -70,6 +70,8 @@ export const STATUS_NAME = {
 // CSRF 令牌：服务端对写操作（非 GET/HEAD）校验双提交令牌，
 // 前端必须带上，否则一律 403。登录成功后由 /api/auth/login 返回并缓存于此。
 let csrfToken = '';
+// 是否需要登录认证（由 /api/auth/status 告知）。未启用时后端不拦截，前端也不显示登录入口。
+let authRequired = false;
 
 export function setCsrfToken(t) {
   csrfToken = t || '';
@@ -79,12 +81,18 @@ export function getCsrfToken() {
   return csrfToken;
 }
 
-// 启动时先向服务端要一次令牌（已登录的情况下 /api/auth/status 会返回）
+export function isAuthRequired() { return authRequired; }
+
+// 启动时先向服务端要一次令牌（已登录的情况下 /api/auth/status 会返回）。
+// 同时把「是否需要登录」记下来：认证未启用时后端不拦截，前端也不该显示登录入口。
 export async function initCsrf() {
   try {
     const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
     const data = await res.json();
-    if (data && data.csrf) csrfToken = data.csrf;
+    if (data) {
+      authRequired = data.required !== false;
+      if (data.csrf) csrfToken = data.csrf;
+    }
   } catch { /* 未登录或网络异常，保持空值 */ }
   return csrfToken;
 }
@@ -106,7 +114,13 @@ export async function api(path, opts = {}) {
   });
   let data = {};
   try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    // 会话过期（认证已启用时）：回登录页，而不是抛一个看不懂的 HTTP 401
+    if (res.status === 401 && !path.startsWith('/api/auth/')) {
+      location.replace('/login.html');
+    }
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
   return data;
 }
 
