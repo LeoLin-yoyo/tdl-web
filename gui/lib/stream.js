@@ -237,42 +237,54 @@ function pushLog(text) {
 
 // ---- session copy (the isolated bolt storage) --------------------------------
 
-// `tdl migrate` copies every namespace of the live session into STREAM_DIR.
-// It asks a y/N confirm which we auto-answer through the pty (same technique
-// as the login flow's confirm prompts). Reads the SOURCE bolt db, so it must
-// run when no other tdl process holds the lock.
+// The playback serve needs its OWN bolt file so it never fights the downloader
+// for the source lock. We used to produce that copy with `tdl migrate`, but
+// migrate opens an interactive y/N confirmation on the pty; when the answer
+// does not land in time it dies with `Error: confirm: ... - EOF` and leaves a
+// TRUNCATED destination file (observed: 65536 bytes vs the real 131072). The
+// serve then started against that half-written bolt, could not find the auth
+// key, and every preview ended in `not authorized. please login first` →
+// the UI's "等待播放服务就绪超时".
 //
-// No user input reaches this invocation: the only argument is the storage path
-// derived from config.DATA_DIR at load time. Arguments are passed as an argv
-// array to the pty (no shell), exactly as lib/tdl.js does for every command.
-function migrateArgs() {
-  return ['migrate', '--to', `type=bolt,path=${STREAM_DIR.replace(/\\/g, '/')}`];
+// tdl's bolt store is a single self-contained file per namespace, so copying
+// it byte-for-byte is both sufficient (verified: the copy lists chats fine)
+// and non-interactive. The source is only ever READ, so the live session is
+// never put at risk.
+//
+// Copy to a temp name and rename into place: a reader can never observe a
+// partially written destination, so a failed copy cannot poison later runs.
+function copySessionFile(src, dst) {
+  const tmp = `${dst}.tmp-${process.pid}`;
+  try {
+    fs.copyFileSync(src, tmp);
+    const copied = fs.statSync(tmp).size;
+    const original = fs.statSync(src).size;
+    // A short read would produce exactly the broken half-a-bolt state above.
+    if (copied !== original || copied === 0) {
+      throw new Error(`会话复制不完整（${copied}/${original} 字节）`);
+    }
+    fs.renameSync(tmp, dst);
+    return copied;
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    throw e;
+  }
 }
 
-function runMigrate() {
-  return new Promise((resolve, reject) => {
-    const h = tdl.startTdl(migrateArgs(), {});
-    let out = '';
-    let answered = false;
-    h.onLine((line) => { out += `${line}\n`; });
-    h.onChunk((chunk) => {
-      out += String(chunk);
-      if (!answered && /continue\?/i.test(out)) {
-        answered = true;
-        try { h.write('y\r'); } catch { /* dying */ }
-      }
-    });
-    const timer = setTimeout(() => { try { h.kill(); } catch { /* gone */ } }, 60_000);
-    h.exit.then(({ exitCode }) => {
-      clearTimeout(timer);
-      if (exitCode === 0) return resolve();
-      reject(new Error(`tdl migrate 失败（exit ${exitCode}）: ${(out || '').trim().split('\n').pop() || ''}`.slice(0, 200)));
-    });
-  });
+// A source bolt file must exist before we can mirror it; without one there is
+// simply nothing to play (the user is not logged in for that namespace).
+function sourceSessionFile(ns) {
+  return path.join(os.homedir(), '.tdl', 'data', ns);
 }
 
-async function defaultNsIdle() {
-  return !tdl.queueInfo().active && !tasks.hasRunningServe();
+// Cheap sanity check for an existing copy. A zero-byte or structurally
+// impossible file (bolt files carry a fixed-size header) means a previous
+// copy was interrupted, so we rebuild instead of trusting it.
+function copyLooksUsable(p) {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() && st.size >= 4096;
+  } catch { return false; }
 }
 
 // The copy is refreshed when the live session is newer (e.g. after a
@@ -282,23 +294,30 @@ async function defaultNsIdle() {
 async function ensureSessionCopy() {
   fs.mkdirSync(STREAM_DIR, { recursive: true });
   const ns = String(config.load().ns || 'default');
-  const src = path.join(os.homedir(), '.tdl', 'data', ns);
+  const src = sourceSessionFile(ns);
   const dst = path.join(STREAM_DIR, ns);
 
-  let haveCopy = false;
-  try { haveCopy = fs.statSync(dst).isFile(); } catch { /* missing */ }
+  // No source session → no playback. Report it as a login problem, which is
+  // what it actually is, instead of a confusing readiness timeout.
+  let srcSize = 0;
+  try { srcSize = fs.statSync(src).size; } catch {
+    throw new Error(`未找到 ${ns} 命名空间的登录会话（${src}）。请先在“账号登录”页完成登录。`);
+  }
+  if (!srcSize) throw new Error(`${ns} 命名空间的会话文件为空，请重新登录。`);
+
+  let haveCopy = copyLooksUsable(dst);
   let needFresh = !haveCopy;
   if (haveCopy) {
+    // Refresh when the live session moved on (e.g. a re-login).
     try { needFresh = fs.statSync(src).mtimeMs > fs.statSync(dst).mtimeMs + 1000; } catch { needFresh = false; }
   }
   if (!needFresh) return;
 
-  if (!(await defaultNsIdle())) {
-    if (haveCopy) return; // stale but usable; refreshed at a quieter moment
-    throw new Error('正在初始化播放会话，但 tdl 正被下载任务占用。请稍后重试，或等任务结束。');
-  }
+  // Copying only reads the source, so a running downloader is not a reason to
+  // fail: unlike `migrate`, there is no lock to contend for.
   try {
-    await tdl.enqueue('stream:migrate', runMigrate);
+    const bytes = copySessionFile(src, dst);
+    pushLog(`已镜像播放会话：${ns}（${bytes} 字节）`);
   } catch (e) {
     if (haveCopy) return; // keep playing on the existing copy
     throw new Error(`播放会话初始化失败：${String(e.message || e)}`);
