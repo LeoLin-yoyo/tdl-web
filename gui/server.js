@@ -90,6 +90,30 @@ function pinPath(baseDir, rel) {
   return target;
 }
 
+// 静态资源的版本号：取 public 目录下最新改动时间。
+//
+// ES module 的 import 图会被浏览器整个缓存，改完前端常常要用户手动强刷才生效
+// （调试期间就反复遇到：磁盘与公网返回的都已是新代码，浏览器里跑的还是旧的）。
+// html 里给入口脚本挂上这个版本号，脚本一改 URL 就变，模块链自然整体重新加载，
+// 不必再指望用户去按 Ctrl+Shift+R。
+let staticVersion = '0';
+function refreshStaticVersion() {
+  const walk = (dir, newest) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return newest; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) newest = walk(p, newest);
+      else {
+        try { newest = Math.max(newest, fs.statSync(p).mtimeMs); } catch { /* gone */ }
+      }
+    }
+    return newest;
+  };
+  staticVersion = String(Math.floor(walk(PUBLIC_DIR, 0)));
+}
+refreshStaticVersion();
+
 function serveStatic(res, pathname) {
   const rel = pathname === '/' ? '/index.html' : pathname;
   const target = pinPath(PUBLIC_DIR, rel);
@@ -101,15 +125,42 @@ function serveStatic(res, pathname) {
         return fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e2, idx) => {
           if (e2) return sendJson(res, 404, { error: 'not found' });
           res.writeHead(200, { 'Content-Type': STATIC_TYPES['.html'], 'Cache-Control': 'no-cache' });
-          res.end(idx);
+          res.end(tagEntryScript(idx.toString('utf8')));
         });
       }
       return sendJson(res, 404, { error: 'not found' });
     }
     const type = STATIC_TYPES[path.extname(target).toLowerCase()] || 'application/octet-stream';
+    // index.html 里把入口脚本的 URL 改成带版本号的，模块图随之整体失效重载
+    if (target.endsWith('index.html')) {
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+      return res.end(tagEntryScript(data.toString('utf8')));
+    }
+    // JS 模块：把内部相对 import 也打上版本号，绕开 Cloudflare 的 4 小时缓存
+    if (target.endsWith('.js')) {
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+      return res.end(tagModuleImports(data.toString('utf8')));
+    }
     res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
     res.end(data);
   });
+}
+
+// 给 index.html 的入口模块打上版本号（见 staticVersion 的说明）
+function tagEntryScript(html) {
+  return html.replace(/(src="\/js\/main\.js)(["'])/g, `$1?v=${staticVersion}$2`);
+}
+
+// Cloudflare 会给静态资源补上 max-age=14400（实测响应头如此），把源站的
+// no-cache 顶掉 —— 于是改完前端要等 4 小时才生效，调试期间被这个坑了很久
+// （磁盘、公网 curl 都是新代码，浏览器里跑的还是旧的）。
+// 这里给 JS 内部所有相对 import 也挂上版本号：条目 URL 一变，整张模块图
+// 都会按新 URL 重新取，绕开边缘缓存。只在文本里做字面替换，不改变语义。
+function tagModuleImports(src) {
+  return src.replace(
+    /\b(from\s*|import\s*\(|import\s*)(["'])(\.{1,2}\/[^"']+\.js)\2/g,
+    (_m, kw, q, spec) => `${kw}${q}${spec}?v=${staticVersion}${q}`,
+  );
 }
 
 // ---- SSE -------------------------------------------------------------------
@@ -486,6 +537,16 @@ const server = http.createServer((req, res) => {
   }
   serveStatic(res, pathname);
 });
+
+// 临时诊断：记录浏览器实际请求的静态资源 URL（含版本号），
+// 用来确认前端缓存问题究竟出在哪一环。可通过 TDLWEB_REQLOG=0 关闭。
+if (process.env.TDLWEB_REQLOG !== '0') {
+  server.on('request', (req) => {
+    if (req.url && (req.url.includes('.js') || req.url.includes('.html'))) {
+      console.log(`[req] ${req.url}`);
+    }
+  });
+}
 
 server.listen(PORT, HOST, () => {
   const cfg = config.load();
