@@ -68,3 +68,13 @@ desktop.ini
 *~
 .mimosa/
 .gitignore.bak
+
+# ---- 本地部署产物（不应提交） ----
+/bin/
+/data/
+/logs/
+/部署备忘.md
+/开发备忘.md
+/tunnel.sh
+/watchdog.sh
+/boot-hook.sh
