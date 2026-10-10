@@ -11,7 +11,12 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 
 const BLOCK_RE = /^[\u2580\u2584\u2588\u2592\u0020]+$/; // ▀ ▄ █ ▒ + spaces
-const RE_SUCCESS = /Login successfully! ID: (\d+), Username: (\S*)/;
+// 注意：tdl 实际输出是 `... Username: \n`（冒号后有一个空格，用户名可能为空）。
+// analyzeLine 会对每行做 trimEnd()，把那个空格吃掉，导致原先写死的
+// `Username: (\S*)`（冒号后必须跟一个空格）失配 —— 于是"登录成功"被漏判、
+// 最终按进程退出码判为失败（现象：手机已登录、界面报 `tdl 提前退出（exit 0）`）。
+// 这里把分隔符放宽为 \s*，空格有无都能匹配。
+const RE_SUCCESS = /Login successfully! ID: (\d+), Username:\s*(\S*)/;
 const RE_IMPORT_OK = /Import (\d+) successfully to '([^']+)' namespace/;
 const RE_SELECT_USER = /Choose a user id/;
 const RE_CONFIRM_LOGOUT = /logout existing desktop session/;
@@ -354,14 +359,36 @@ async function runLogin(sess) {
     }, 5000);
     const overall = setTimeout(() => { sess.error = sess.error || '登录超时（15 分钟）'; h.kill(); }, 15 * 60 * 1000);
 
-    h.exit.then(({ exitCode }) => {
+    h.exit.then(async ({ exitCode }) => {
       clearInterval(watchdog);
       clearTimeout(overall);
       sess.handle = null;
       sess.finishedAt = Date.now();
       if (sess.state !== 'success') {
-        if (sess.cancelRequested) sess.state = 'canceled';
-        else {
+        if (sess.cancelRequested) {
+          sess.state = 'canceled';
+        } else if (exitCode === 0) {
+          // tdl 登录成功后本就会正常退出（exit 0）。此前一律按失败处理，
+          // 于是"手机显示已登录、会话也写入了 ~/.tdl，界面却报失败"
+          // （实测错误文案为 `tdl 提前退出（exit 0）`）。
+          // 这里改为以「会话是否真的可用」为准：跑一次 listChats，
+          // 能拉到会话列表就是登录成功，不靠退出码猜。
+          await new Promise((r) => setTimeout(r, 800)); // 等 tdl 落盘
+          try {
+            const chats = require('./chats');
+            const r = await chats.listChats({ refresh: true });
+            if (r && !r.error) {
+              sess.user = sess.user || await queryAccount();
+              sess.state = 'success';
+              sess.pushLog = sess.pushLog || (() => {});
+              rememberLogin(sess, sess.user);
+            }
+          } catch { /* 验证失败则维持失败判定 */ }
+          if (sess.state !== 'success') {
+            sess.state = 'failed';
+            sess.error = sess.error || `tdl 已退出（exit ${exitCode}），且会话校验未通过`;
+          }
+        } else {
           sess.state = 'failed';
           sess.error = sess.error || `tdl 提前退出（exit ${exitCode}）`;
         }
