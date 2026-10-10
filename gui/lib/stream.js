@@ -79,6 +79,11 @@ const POOL_START = 8;
 // synchronously). This caps that wait so a leaked `urgent` counter can never
 // park a worker forever.
 const URGENT_WAIT_MAX = 15_000;
+// 播放头取一个块时，顺带并行预取的后续块数（见 blockData 里的"借并发"）。
+// 一个块只有 2 路（BLOCK = 2×SERVE_UNIT），而高丢包链路上 TCP 单路吞吐会
+// 塌缩，播放头因此长期只有几百 KB/s。多带 3 个块可把在途请求抬到 8 路，
+// 且这些块本来就要取，不是浪费。取 3 是权衡：再多会挤占预取池的带宽。
+const RUSH_BLOCKS = 3;
 // HEAD enrichment of the file list, and how long task lookups stay cached.
 const ENRICH_CONCURRENCY = 6;
 const TASK_LOOKUP_TTL = 15_000;
@@ -702,6 +707,42 @@ class FileStreamer {
         const p = this.fetchRange(start + off, end);
         p.catch(() => {}); // abandoned units (seek away / disconnect) must not hit unhandledRejection
         units.push({ off, p });
+      }
+      // 借并发：一个块只有 2×SERVE_UNIT=2 路，在高丢包链路上会被 TCP 的
+      // 拥塞控制压到极低（Mathis 公式：吞吐 ∝ 1/(RTT·√丢包)。25% 丢包 +
+      // 200ms RTT 时单路理论仅 0.06 MB/s），而播放头偏偏是整条链路上最饿
+      // 的消费者。此处顺手把紧随其后的几个块也发出去：它们本来迟早要取，
+      // 提前并行既把在途请求数从 2 抬到 RUSH_BLOCKS×2，又让数据进了缓存，
+      // 不做无用功。
+      //
+      // 注意：这里不能直接用 fetchBlock —— 它会按失败结果触发 AIMD 缩池，
+      // 而这是"锦上添花"的预取，失败不该反过来惩罚池子宽度。故只发原始
+      // 范围请求，成功就顺手塞进缓存，失败静默丢弃（真正需要时会按常规
+      // 路径重取）。
+      for (let k = 1; k <= RUSH_BLOCKS; k++) {
+        const nb = blk + k;
+        const nStart = nb * BLOCK;
+        if (nStart >= this.total) break;
+        if (this.mem.has(nb) || this.inflight.has(nb)) continue;
+        const nLen = Math.min(BLOCK, this.total - nStart);
+        const queued = [];
+        for (let off = 0; off < nLen; off += SERVE_UNIT) {
+          const end = nStart + Math.min(off + SERVE_UNIT, nLen) - 1;
+          const p = this.fetchRange(nStart + off, end);
+          p.catch(() => {});
+          queued.push(p);
+        }
+        const q = Promise.all(queued).then((bufs) => {
+          const buf = Buffer.concat(bufs);
+          if (!this.mem.has(nb)) {
+            this.mem.set(nb, { buf, at: Date.now() });
+            this.bytes += buf.length;
+            this.evict();
+          }
+          return buf;
+        }).catch((e) => { throw e; }).finally(() => this.inflight.delete(nb));
+        q.catch(() => { /* 借并发失败不算数 */ });
+        this.inflight.set(nb, q);
       }
       const all = Promise.all(units.map((u) => u.p)).then((bufs) => {
         const buf = Buffer.concat(bufs);
