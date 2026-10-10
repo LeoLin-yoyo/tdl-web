@@ -85,22 +85,35 @@ async function render(view) {
   const logsBox = view.querySelector('#login-logs');
   const cancelBox = view.querySelector('#login-cancel-box');
 
+  // 记住上一次渲染的「状态签名」，只有内容真的变了才重建 DOM。
+  // 这里最关键的是二维码：draw() 用 innerHTML 整体重建，
+  // 若每 1.2 秒无条件重绘，<img> 会被反复销毁重建、图片反复重新加载，
+  // 二维码就一直闪、根本扫不了。所以 qrText 没变时直接跳过重绘。
+  let lastSig = null;
+
   function draw() {
     const l = store.login;
     logsBox.textContent = (l.logs || []).join('\n') || '（暂无日志）';
 
-    if (!l || l.state === 'idle') return;
+    if (!l || l.state === 'idle') { lastSig = null; return; }
+
+    // 状态签名：只有这些内容变化才需要重绘。
+    // 二维码的签名里只放 qrKey（内容哈希），不放完整 qrText。
+    const qrKey = l.qrText
+      ? l.qrText.length + '_' + l.qrText.charCodeAt(0) + '_' + (l.qrText.charCodeAt(l.qrText.length - 1) || 0)
+      : '';
+    const sig = [l.state, l.active, qrKey, l.error, l.user ? l.user.id : '',
+      (l.userIds || []).join(','), l.restored, l.ns].join('|');
+    if (sig === lastSig) return;   // 内容没变 —— 绝不碰 DOM，避免二维码闪烁
+    lastSig = sig;
 
     if (l.state === 'starting') {
       stateBox.innerHTML = `<div class="empty"><span class="spin">◐</span> 正在启动 tdl 并连接 Telegram…</div>`;
     } else if (l.state === 'qr') {
-      // 二维码优先后端渲染的 PNG：方块字符靠客户端等宽字体显示时，
+      // 二维码由后端渲染成 PNG：方块字符靠客户端等宽字体显示时，
       // 字体缺失会导致矩阵错位、扫码失败；PNG 则与客户端字体无关。
-      // 缓存键用 qrText 的简单哈希：内容变化（tdl 刷新二维码）时 URL 随之改变，
+      // 缓存键用 qrText 的内容哈希：内容变化（tdl 刷新二维码）时 URL 随之改变，
       // 避免浏览器复用旧图。
-      const qrKey = l.qrText
-        ? l.qrText.length + '_' + l.qrText.charCodeAt(0) + '_' + (l.qrText.charCodeAt(l.qrText.length - 1) || 0)
-        : '';
       const qrBlock = l.qrText
         ? `<img class="qr-img" src="/api/login/qr.png?v=${qrKey}"
                 alt="登录二维码"
@@ -177,14 +190,20 @@ async function render(view) {
       inputBox.classList.add('hidden');
     }
 
-    cancelBox.innerHTML = l.active ? `<button class="btn sm danger" id="login-cancel">取消登录</button>` : '';
-    const cancelBtn = view.querySelector('#login-cancel');
-    if (cancelBtn) cancelBtn.onclick = () => api('/api/login/cancel', { method: 'POST' }).catch((e) => toast(e.message, 'error'));
+    // 取消按钮同样只在内容变化时重建，避免无谓的 DOM 抖动
+    const cancelHtml = l.active ? `<button class="btn sm danger" id="login-cancel">取消登录</button>` : '';
+    if (cancelBox.innerHTML !== cancelHtml) {
+      cancelBox.innerHTML = cancelHtml;
+      const cancelBtn = view.querySelector('#login-cancel');
+      if (cancelBtn) cancelBtn.onclick = () => api('/api/login/cancel', { method: 'POST' }).catch((e) => toast(e.message, 'error'));
+    }
   }
 
   draw();
   if (inputTimer) clearInterval(inputTimer);
-  inputTimer = setInterval(draw, 1200); // keep QR/state fresh even without SSE deltas
+  // SSE 已能实时推送状态变化，这里只作兜底，间隔放宽到 3 秒即可。
+  // 真正的闪烁来源已由 draw() 的签名比对消除。
+  inputTimer = setInterval(draw, 3000);
 
   // restore the saved login draft, then keep it updated as the user types
   api(`/api/forms?key=${LOGIN_DRAFT_KEY}`).then(({ data }) => {
