@@ -16,6 +16,37 @@ const state = {
 let hud = null;      // active player wiring (cleared when the page unmounts)
 let hudTimer = null; // idle timer that hides the control overlay
 
+// ---- 浏览器侧的真实接收速度 ------------------------------------------------
+//
+// 播放器右上角原先显示的 `netBps` 来自服务端，统计的是「服务器从 tdl serve
+// 取到多少字节」——那是服务器与 Telegram 之间的速度，跟数据送到这台电脑的
+// 快慢毫无关系。两者可以差一个数量级，于是出现「界面显示缓冲飞快、眼前却
+// 一直卡」的错位。
+//
+// 这里改用浏览器自己的 `video.buffered` 增长量来估算真实送达速度：它量的
+// 是「已经躺在这台机器上、随时可播」的字节，正是用户真正能感知的那一段。
+//
+// 注意作用域：这两个函数供 setupPlayer（建立 HUD）之外的 startStatsPoll
+// （轮询）使用，所以必须放在模块级。早先误放在 setupPlayer 内，导致轮询时
+// 抛 "sampleDl is not defined"，而空 catch 把它吞了，HUD 永远停在占位「—」。
+const dlBufferedEnd = (video) => {
+  try {
+    let end = 0;
+    for (let i = 0; i < video.buffered.length; i++) end = Math.max(end, video.buffered.end(i));
+    return end;
+  } catch { return 0; }
+};
+
+// 采样真实送达速度（字节/秒）。缓冲区间会因 seek 重置，故只在单调增长时取值。
+const sampleDownloadRate = (video) => {
+  const t = dlBufferedEnd(video);
+  const now = Date.now();
+  const prev = hud && hud.dl;
+  if (hud) hud.dl = { t, at: now };
+  if (!prev || now - prev.at < 900 || t <= prev.t) return null;
+  return Math.round((t - prev.t) / ((now - prev.at) / 1000));
+};
+
 function urlsOf() {
   const el = document.getElementById('p-urls');
   return (el ? el.value : '').split(/\r?\n|;/).map((s) => s.trim()).filter(Boolean);
@@ -128,31 +159,8 @@ function setupPlayer(view) {
 
   hud = { shell, video, poll: null, idx: -1, sid: '', dl: null };
 
-  // 浏览器侧的真实接收速度。
-  //
-  // 右上角原先显示的 `netBps` 来自服务端，统计的是「服务器从 tdl serve 取到多少
-  // 字节」——那是服务器与 Telegram 之间的速度，跟数据送到这台电脑的快慢毫无关系。
-  // 两者可以差一个数量级（实测服务器侧 11~22 MB/s，而经隧道送到外网只有 1~3.5），
-  // 于是出现「界面显示缓冲飞快、眼前却一直卡」的错位。
-  //
-  // 这里改用浏览器自己的 `video.buffered` 增长量来估算真实送达速度：
-  // 它量的是「已经躺在这台机器上、随时可播」的字节，正是用户真正能感知的那一段。
-  const dlBytes = () => {
-    try {
-      let end = 0;
-      for (let i = 0; i < video.buffered.length; i++) end = Math.max(end, video.buffered.end(i));
-      return end;
-    } catch { return 0; }
-  };
-  const sampleDl = () => {
-    const t = dlBytes();
-    const now = Date.now();
-    const prev = hud.dl;
-    hud.dl = { t, at: now };
-    if (!prev || now - prev.at < 900 || t <= prev.t) return null;
-    // 秒 -> 字节/秒；缓冲区间可能因 seek 重置，故只在单调增长时采样
-    return Math.round((t - prev.t) / ((now - prev.at) / 1000));
-  };
+  // （真实接收速度的采样函数见文件顶部 sampleDownloadRate —— 那里是模块级，
+  //   因为轮询逻辑在另一个函数里，需要共用。）
 
   const setPlayIcon = () => {
     // The centre button is an overlay affordance only: while playing it fades
@@ -316,6 +324,9 @@ function startStatsPoll(sid, idx) {
   const speedEl = hud.shell.querySelector('#pl-speed');
   const netEl = hud.shell.querySelector('#pl-net');
   const video = hud.shell.querySelector('video');
+  // 排查用：HUD 的数值区若一直停在 HTML 初始占位「—」，多半是这里没查到位
+  // 或 tick() 抛错。先确认取到的元素是真实存在的。
+  console.info('[play] stats poll 启动', { sid, idx, hasSpeed: !!speedEl, hasNet: !!netEl, hasVideo: !!video });
   const tick = async () => {
     if (!hud || hud.sid !== sid || hud.idx !== idx) return;
     try {
@@ -342,19 +353,35 @@ function startStatsPoll(sid, idx) {
       //   「下载」= 这台电脑真正收到的速度（浏览器 buffered 增长量）
       //   「服务器」= 服务器从 Telegram 取数的速度（仅作参考，不代表你能看到多快）
       // 卡顿几乎总是前者远小于后者，把两个数并排摆出来，问题一眼可见。
-      const dl = sampleDl();
+      const dl = sampleDownloadRate(video);
       if (dl !== null) hud.lastDl = dl;
       const dlRate = hud.lastDl;
-      const dlTxt = dlRate ? `下载 ${fmtBytes(dlRate)}/s` : '下载 —';
       const srvTxt = s.netBps ? `服务器 ${fmtBytes(s.netBps)}/s` : '服务器 —';
+
+      // 「下载速度」是缓冲区的增长速率。当播放头前方已经屯了足够多的数据
+      // （或整个文件都缓冲完了），缓冲区不再增长，采样会趋近 0——此时显示
+      // "1 B/s" 会被误读成"网速崩了"，其实恰恰相反。所以：够用就直说够用，
+      // 把真实数值留给真正在追赶网络的时刻。
+      const COMFY = 8 * 1048576; // 前方有 8MB 余量就不必报速度了
+      const comfy = ahead >= COMFY;
+      const dlTxt = comfy
+        ? '下载 已充分缓冲'
+        : (dlRate ? `下载 ${fmtBytes(dlRate)}/s` : '下载 —');
 
       speedEl.textContent = stalled
         ? `缓冲中 · ${dlTxt} · ${srvTxt}`
         : `${dlTxt} · ${srvTxt}${ahead > 0 ? ` · 领先 ${fmtBytes(ahead)}` : ''}`;
-      // 告警条件也改用「真实送达速度」：服务器再快，送不到这台电脑就是卡。
-      // 4 MB/s 约合 32 Mbps，是 4K 顺畅播放的粗略下限。
-      speedEl.classList.toggle('warn', stalled || (!!dlRate && dlRate < 4 * 1048576));
-    } catch { /* transient */ }
+      // 告警条件改用「真实送达速度」：服务器再快，送不到这台电脑就是卡。
+      // 4 MB/s 约合 32 Mbps，是 4K 顺畅播放的粗略下限。已充分缓冲时不告警。
+      speedEl.classList.toggle('warn', stalled || (!comfy && !!dlRate && dlRate < 4 * 1048576));
+    } catch (e) {
+      // 这里原来是个空 catch。结果 tick() 一旦抛错，HUD 就永远停在 HTML 里的
+      // 初始占位「—」，看起来像"没数据"，实际是脚本挂了——排查时因此白绕了
+      // 一大圈（以为是接口出错，curl 却一路 200）。留个痕迹，至少能在控制台
+      // 看见真因；顺带把状态显示出来，好和"正常但值为空"区分开。
+      if (hud && hud.sid === sid) speedEl.textContent = `统计异常: ${String(e && e.message || e).slice(0, 60)}`;
+      console.error('[play] stats tick 失败', e);
+    }
   };
   tick();
   hud.poll = setInterval(tick, 1000);
