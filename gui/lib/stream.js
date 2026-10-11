@@ -278,8 +278,18 @@ function copySessionFile(src, dst) {
 
 // A source bolt file must exist before we can mirror it; without one there is
 // simply nothing to play (the user is not logged in for that namespace).
+//
+// This function is the path sink for the namespace, so it validates INLINE
+// rather than trusting callers: the value names a file inside ~/.tdl/data, and
+// `..` or a separator must never reach path.join. Only the token shape tdl
+// itself produces is accepted.
+const NS_TOKEN = /^[A-Za-z0-9_-]{1,32}$/;
 function sourceSessionFile(ns) {
-  return path.join(os.homedir(), '.tdl', 'data', ns);
+  const name = String(ns == null ? '' : ns);
+  if (!NS_TOKEN.test(name)) throw new Error(`命名空间不合法：${name}`);
+  // basename() is a second, independent guard: even if the regex above were
+  // loosened later, no separator can survive it.
+  return path.join(os.homedir(), '.tdl', 'data', path.basename(name));
 }
 
 // Cheap sanity check for an existing copy. A zero-byte or structurally
@@ -292,41 +302,62 @@ function copyLooksUsable(p) {
   } catch { return false; }
 }
 
+// Mirror the live bolt session of `ns` into `dir` and return its path.
+//
+// Two callers need their OWN bolt file: the playback serve and the link
+// resolver (lib/resolve.js). Both only ever READ Telegram, but tdl's store is
+// single-writer, so opening the live file while a download task runs fails with
+// "database is used by another process". A byte copy sidesteps that — the
+// source is never modified, so a running downloader is not put at risk.
+//
 // The copy is refreshed when the live session is newer (e.g. after a
-// re-login). While any tdl process runs the source lock is busy — then an
-// existing copy is used as-is (its session stays valid even if stale) and a
-// missing copy becomes an explicit error.
-async function ensureSessionCopy() {
-  fs.mkdirSync(STREAM_DIR, { recursive: true });
-  const ns = String(config.load().ns || 'default');
-  const src = sourceSessionFile(ns);
-  const dst = path.join(STREAM_DIR, ns);
+// re-login). If the copy cannot be refreshed, an existing one is used as-is
+// (its session stays valid even if stale); only a missing copy is an error.
+function mirrorSession(ns, dir) {
+  // The namespace names the bolt file, so it must stay a single plain path
+  // segment: a value like `..\..\x` would otherwise let the copy (and the
+  // stat/refresh checks above it) escape `dir`. config.safeNs is the source of
+  // truth; re-checking here keeps the guarantee even if a caller passes a raw
+  // value straight in.
+  const name = config.safeNs(ns);
+  fs.mkdirSync(dir, { recursive: true });
+  const src = sourceSessionFile(name);
+  const dst = path.join(dir, name);
+  // belt and braces: the resolved destination must sit directly inside `dir`
+  if (path.dirname(path.resolve(dst)) !== path.resolve(dir)) {
+    throw new Error(`命名空间不合法：${String(ns)}`);
+  }
 
-  // No source session → no playback. Report it as a login problem, which is
-  // what it actually is, instead of a confusing readiness timeout.
+  // No source session → the user is simply not logged in for this namespace.
+  // Report it as a login problem, which is what it actually is.
   let srcSize = 0;
   try { srcSize = fs.statSync(src).size; } catch {
-    throw new Error(`未找到 ${ns} 命名空间的登录会话（${src}）。请先在“账号登录”页完成登录。`);
+    throw new Error(`未找到 ${name} 命名空间的登录会话（${src}）。请先在“账号登录”页完成登录。`);
   }
-  if (!srcSize) throw new Error(`${ns} 命名空间的会话文件为空，请重新登录。`);
+  if (!srcSize) throw new Error(`${name} 命名空间的会话文件为空，请重新登录。`);
 
-  let haveCopy = copyLooksUsable(dst);
+  const haveCopy = copyLooksUsable(dst);
   let needFresh = !haveCopy;
   if (haveCopy) {
     // Refresh when the live session moved on (e.g. a re-login).
     try { needFresh = fs.statSync(src).mtimeMs > fs.statSync(dst).mtimeMs + 1000; } catch { needFresh = false; }
   }
-  if (!needFresh) return;
+  if (!needFresh) return { path: dst, copied: 0 };
 
   // Copying only reads the source, so a running downloader is not a reason to
   // fail: unlike `migrate`, there is no lock to contend for.
   try {
-    const bytes = copySessionFile(src, dst);
-    pushLog(`已镜像播放会话：${ns}（${bytes} 字节）`);
+    return { path: dst, copied: copySessionFile(src, dst) };
   } catch (e) {
-    if (haveCopy) return; // keep playing on the existing copy
-    throw new Error(`播放会话初始化失败：${String(e.message || e)}`);
+    if (haveCopy) return { path: dst, copied: 0 }; // keep using the existing copy
+    throw new Error(`会话镜像失败：${String(e.message || e)}`);
   }
+}
+
+async function ensureSessionCopy() {
+  const ns = String(config.load().ns || 'default');
+  const { copied } = mirrorSession(ns, STREAM_DIR);
+  if (copied) pushLog(`已镜像播放会话：${ns}（${copied} 字节）`);
 }
 
 // ---- serve session -----------------------------------------------------------
@@ -509,10 +540,14 @@ async function lookupTaskFile(href, fallbackName) {
         entry.names.set(href, name);
       } catch { continue; }
     }
+    // The name comes from serve's Content-Disposition (i.e. a Telegram file
+    // name) and is used to READ the task's .part on disk — keep it a plain
+    // base name so a crafted name cannot point the read outside `s.dir`.
+    const base = path.basename(String(name));
     return {
-      final: path.join(s.dir, name),
-      part: `${path.join(s.dir, name)}.part`,
-      sidecar: `${path.join(s.dir, name)}.part.json`,
+      final: path.join(s.dir, base),
+      part: `${path.join(s.dir, base)}.part`,
+      sidecar: `${path.join(s.dir, base)}.part.json`,
     };
   }
   return null;
@@ -1097,4 +1132,4 @@ setInterval(() => {
   }
 }, 30_000).unref();
 
-module.exports = { preview, state, stop, handlePlay, stats, BLOCK };
+module.exports = { preview, state, stop, handlePlay, stats, BLOCK, mirrorSession };

@@ -1,7 +1,7 @@
 // Task pages: download / forward / upload / export.
 // Each page = create-form + live task list (filtered by type).
 
-import { api, esc, store, notify, listeners, registerRoute, toast } from '../app.js';
+import { api, esc, fmtBytes, store, notify, listeners, registerRoute, toast, modal } from '../app.js';
 import { renderTaskList, pickChat, val, checked, numVal, lines } from '../components.js';
 
 const defaults = () => store.config || {};
@@ -44,11 +44,11 @@ function dlForm() {
   const d = defaults();
   return formCard('新建下载任务', `
     <div class="field">
-      <label>消息链接（每行一条，如 https://t.me/tdl/1、https://t.me/c/1697797156/150/200）</label>
+      <label>消息链接（每行一条，如 https://t.me/tdl/1、https://t.me/c/1697797156/150）</label>
       <textarea id="f-urls" rows="4" placeholder="https://t.me/tdl/10"></textarea>
       <div><button class="btn sm" id="pick-chat-btn" type="button">从会话列表挑选 ↗</button>
-      <span class="hint">选中后插入 https://t.me/用户名 链接，请自行补上 /消息ID（可加起止范围 /起/止）</span></div>
-      <span class="hint">每行链接会生成一张独立的任务卡片，可单独暂停/继续</span>
+      <span class="hint">选中后插入 https://t.me/用户名 链接，请自行补上 /消息ID</span></div>
+      <span class="hint">点「创建」时会先解析链接里的资源：<b>多个资源</b>（相册等）会弹出列表让你勾选，勾几个就建几个任务；<b>只有一个</b>则直接建任务。</span>
     </div>
     <div class="field"><label>或：tdl export 生成的 JSON 文件（每行一个绝对路径）</label>
       <textarea id="f-files" rows="2" placeholder="D:\\data\\tdl-export.json"></textarea>
@@ -59,19 +59,114 @@ function dlForm() {
       <datalist id="dl-dir-list"></datalist>
       <span class="hint">可直接输入，也可从下拉选择用过的目录</span></div>
     <div class="hint muted small" style="margin-top:2px">
-      扩展名过滤、文件名模板、并发、相册识别等选项已统一放在
+      扩展名过滤、文件名模板、并发等选项已统一放在
       <a href="#/settings">设置</a> 页，此处不再重复。
     </div>
   `, '创建下载任务');
 }
 
-function submitDl() {
-  const config = {
-    urls: lines('f-urls'),
-    files: lines('f-files'),
-    dir: val('f-dir'),
-  };
-  return api('/api/tasks', { method: 'POST', body: { type: 'dl', config } });
+// ---- download: resolve links into resources, then let the user pick -------
+//
+// A single link can address a whole album: Telegram stores each member as its
+// own message sharing a GroupedID, and `tdl dl -u <link>` downloads only the
+// one message the link points at. The server therefore expands every pasted
+// link into its resources first; when more than one comes back the user picks
+// which ones to download, and each checked resource becomes its own task.
+
+// Show the resolved resources and resolve with the checked links, or null when
+// the dialog is dismissed (the form is then left exactly as it was).
+function pickResources(groups, total) {
+  return new Promise((done) => {
+    const rows = groups.map((g, gi) => {
+      const head = groups.length > 1
+        ? `<div class="res-group">${esc(g.link)}${g.grouped ? ' <span class="badge">相册</span>' : ''}</div>`
+        : '';
+      return head + g.resources.map((r, ri) => `
+        <label class="res-row">
+          <input type="checkbox" class="res-check" data-g="${gi}" data-r="${ri}" checked>
+          <span class="res-name" title="${esc(r.name)}">${esc(r.name)}</span>
+          <span class="res-size muted small">${fmtBytes(r.size)}</span>
+        </label>`).join('');
+    }).join('');
+
+    const m = modal(`识别到 ${total} 个资源，请选择要下载的`, `
+      <div class="res-toolbar">
+        <button class="btn sm" id="res-all" type="button">全选</button>
+        <button class="btn sm" id="res-none" type="button">全不选</button>
+        <span class="muted small" id="res-count"></span>
+      </div>
+      <div class="res-list">${rows}</div>
+      <div class="res-actions">
+        <button class="btn" id="res-cancel" type="button">取消</button>
+        <button class="btn primary" id="res-ok" type="button">下载选中</button>
+      </div>`);
+
+    const checks = [...m.el.querySelectorAll('.res-check')];
+    const countEl = m.el.querySelector('#res-count');
+    const okBtn = m.el.querySelector('#res-ok');
+    const sync = () => {
+      const n = checks.filter((c) => c.checked).length;
+      countEl.textContent = `已选 ${n} / ${checks.length} 个`;
+      okBtn.disabled = n === 0;
+      okBtn.textContent = n ? `下载选中的 ${n} 个` : '下载选中';
+    };
+    checks.forEach((c) => { c.onchange = sync; });
+    m.el.querySelector('#res-all').onclick = () => { checks.forEach((c) => { c.checked = true; }); sync(); };
+    m.el.querySelector('#res-none').onclick = () => { checks.forEach((c) => { c.checked = false; }); sync(); };
+    const dismiss = () => { m.close(); done(null); };
+    m.el.querySelector('#res-cancel').onclick = dismiss;
+    m.el.querySelector('.modal-close').onclick = dismiss;
+    m.el.addEventListener('click', (e) => { if (e.target === m.el) dismiss(); });
+    okBtn.onclick = () => {
+      const picked = checks.filter((c) => c.checked)
+        .map((c) => groups[Number(c.dataset.g)].resources[Number(c.dataset.r)].link);
+      m.close();
+      done(picked);
+    };
+    sync();
+  });
+}
+
+async function submitDl(btn) {
+  const urlLines = lines('f-urls');
+  const files = lines('f-files');
+  const dir = val('f-dir');
+  const create = (urls) =>
+    api('/api/tasks', { method: 'POST', body: { type: 'dl', config: { urls, files, dir } } });
+
+  // No links to expand (export JSON only, or nothing typed) → plain creation.
+  if (!urlLines.length) return create([]);
+
+  const label = btn ? btn.textContent : '';
+  if (btn) btn.textContent = '正在解析链接…';
+  let res;
+  try {
+    res = await api('/api/tasks/resolve', { method: 'POST', body: { text: urlLines.join('\n') } });
+  } catch (e) {
+    // The resolver must never block a download: fall back to one task per link.
+    if (btn) btn.textContent = label;
+    toast(`解析失败，按原始链接直接创建：${e.message}`, 'error');
+    return create(urlLines);
+  }
+  if (btn) btn.textContent = label;
+
+  if (!res || res.unparsed || !res.total) return create(urlLines);
+
+  const good = (res.links || []).filter((g) => g.resources.length);
+  // Links the resolver could not read (deleted / no media / no access) are kept
+  // as-is so the user still gets the task they asked for.
+  const bad = (res.links || []).filter((g) => !g.resources.length).map((g) => g.link);
+  if (bad.length) toast(`${bad.length} 条链接无法解析资源，将按原链接直接创建`, 'error');
+
+  // Every link resolved to exactly one resource → nothing to choose. Keep the
+  // user's own link (it addresses the same message) so the task card reads the
+  // way it was pasted.
+  if (res.trivial) return create([...good.map((g) => g.link), ...bad]);
+
+  const picked = await pickResources(good, res.total);
+  if (picked === null) return { canceled: true };
+  const urls = [...picked, ...bad];
+  return urls.length ? create(urls) : { canceled: true };
 }
 
 // ---- forward --------------------------------------------------------------------
@@ -297,9 +392,12 @@ function makeTaskPage({ type, form, submit }) {
       const btn = view.querySelector('#create-btn');
       btn.disabled = true;
       try {
-        const r = await submit();
+        const r = await submit(btn);
+        // the resource picker was dismissed: keep the form untouched so the
+        // user can adjust the links and try again
+        if (r && r.canceled) return;
         const n = (r && r.count) || 1;
-        toast(n > 1 ? `已创建 ${n} 个任务（每条链接一个），排队执行` : '任务已创建，加入队列', 'ok');
+        toast(n > 1 ? `已创建 ${n} 个任务（每个资源一个），排队执行` : '任务已创建，加入队列', 'ok');
         // clear the "source" inputs to prevent accidental duplicate creation
         for (const id of CLEAR_AFTER_SUBMIT[type] || []) {
           const el = view.querySelector(`#${id}`);

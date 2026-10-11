@@ -55,6 +55,18 @@ function locateTdl() {
   return null; // rely on PATH lookup with bare name
 }
 
+// tdl stores each namespace as a FILE named after it (`~/.tdl/data/<ns>`), so
+// the value is a path segment: anything with separators or `..` would let a
+// crafted setting read or write outside the session/data directories. Accept
+// only the shape tdl itself produces — a short, plain token — and fall back to
+// the default otherwise. Applied on save (below) and re-applied on load, so a
+// hand-edited gui-config.json cannot smuggle a path either.
+const NS_RE = /^[A-Za-z0-9_-]{1,32}$/;
+function safeNs(v) {
+  const s = String(v == null ? '' : v).trim();
+  return NS_RE.test(s) ? s : DEFAULTS.ns;
+}
+
 const DEFAULTS = {
   proxy: '',            // tdl --proxy, e.g. socks5://127.0.0.1:7890
   ns: 'default',        // tdl --ns
@@ -116,6 +128,7 @@ function load() {
   }
 
   cache = { ...DEFAULTS, ...(saved || {}) };
+  cache.ns = safeNs(cache.ns); // never trust a path segment from disk
   // keep working dir sane
   if (typeof cache.dir === 'string' && cache.dir) {
     try {
@@ -151,6 +164,7 @@ function save(patch) {
     next[k] = String(next[k] == null ? '' : next[k]).trim();
   }
   next.dir = path.resolve(String(next.dir || DEFAULTS.dir));
+  next.ns = safeNs(next.ns); // the namespace becomes a filename — never a path
   cache = next;
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -205,5 +219,5 @@ function saveHistory(list) {
 
 module.exports = {
   GUI_ROOT, DATA_DIR, CONFIG_FILE, HISTORY_FILE, TDL_AUTO_DIR, TDL_EXE,
-  locateTdl, load, save, globalArgs, loadHistory, saveHistory, downloadDefaults,
+  locateTdl, load, save, globalArgs, loadHistory, saveHistory, downloadDefaults, safeNs,
 };

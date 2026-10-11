@@ -326,6 +326,25 @@ details.adv .adv-body { padding-top: 10px; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .file-row .file-meta { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* ---- 下载页：链接资源勾选面板 ---- */
+.res-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.res-toolbar #res-count { margin-left: auto; }
+.res-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--border-soft); border-radius: 8px; }
+.res-group {
+  padding: 7px 10px; font-size: 12px; color: var(--muted); font-family: var(--mono);
+  background: var(--bg-soft); border-bottom: 1px solid var(--border-soft);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.res-row {
+  display: flex; align-items: center; gap: 9px; padding: 7px 10px;
+  border-bottom: 1px solid var(--border-soft); cursor: pointer; font-size: 13px;
+}
+.res-row:last-child { border-bottom: none; }
+.res-row:hover { background: var(--panel-2); }
+.res-row .res-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.res-row .res-size { flex: none; }
+.res-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .tag {
   font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
   background: var(--panel-2); color: var(--muted); border: 1px solid var(--border-soft);

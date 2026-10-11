@@ -14,6 +14,7 @@ const files = require('./lib/files');
 const desktop = require('./lib/desktop');
 const db = require('./lib/db');
 const stream = require('./lib/stream');
+const resolve = require('./lib/resolve');
 const tdlfetch = require('./lib/tdlfetch');
 const auth = require('./lib/auth');
 const qrrender = require('./lib/qrrender');
@@ -364,6 +365,13 @@ async function api(req, res, pathname, searchParams) {
 
   if (method === 'GET' && p === '/api/tasks') {
     return sendJson(res, 200, { tasks: tasks.publicList() });
+  }
+  // 解析粘贴的链接里到底包含哪些资源（相册会展开成多个），供下载页勾选。
+  // 走独立的会话副本，不占用下载任务的 bolt 锁。
+  if (method === 'POST' && p === '/api/tasks/resolve') {
+    const body = await readBody(req);
+    const r = await resolve.resolve(body.text || body.urls || '');
+    return sendJson(res, 200, r);
   }
   if (method === 'POST' && p === '/api/tasks') {
     const body = await readBody(req);
