@@ -194,3 +194,187 @@ export function numVal(id, dflt = 0) { const n = Number(val(id)); return Number.
 export function lines(id) {
   return val(id).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
+
+// ---- 通用小播放器（文件页预览用）--------------------------------------------
+//
+// 与「在线播放」页的播放器刻意分开：那个是和 tdl serve 会话、预取池、
+// 进度条 HUD 绑在一起的复杂组件；这里只需要把一个已经能直接读的 URL 放出来。
+// 但保留用户要的两个能力：**浮动窗**（可拖动、可缩放）与**网页内最大化**。
+//
+// 关键约束同 play.js：全程只切 class，不重建 DOM —— 重新挂载 <video> 会
+// 让浏览器卸载并重载视频源，播放中断、进度归零。
+
+export function openMiniPlayer(mount, { src, title = '' } = {}) {
+  if (!mount) throw new Error('缺少挂载点');
+  mount.innerHTML = `
+    <div class="mini-player" id="mp-shell">
+      <div class="mp-dragbar" id="mp-dragbar">
+        <span class="mp-dots">⋮⋮</span>
+        <span class="mp-title">${esc(title)}</span>
+        <span class="mp-hint">拖标题移动 · 拖右下角缩放</span>
+        <button class="mp-x" id="mp-close" title="退出浮动窗">✕</button>
+      </div>
+      <video id="mp-video" playsinline preload="metadata" src="${esc(src)}"></video>
+      <div class="mp-bar" id="mp-bar">
+        <button class="btn xs" id="mp-toggle">▶</button>
+        <span class="mp-time" id="mp-time">0:00 / 0:00</span>
+        <input type="range" class="mp-seek" id="mp-seek" min="0" max="1000" value="0">
+        <button class="btn xs" id="mp-mute">🔊</button>
+        <input type="range" class="mp-vol" id="mp-vol" min="0" max="1" step="0.05" value="1">
+        <button class="btn xs" id="mp-float" title="浮动窗（可拖动、可缩放）">⧉</button>
+        <button class="btn xs" id="mp-max" title="网页内最大化">⛶</button>
+      </div>
+      <div class="mp-resize" id="mp-resize" title="拖动调整大小"></div>
+    </div>`;
+
+  const shell = mount.querySelector('#mp-shell');
+  const video = mount.querySelector('#mp-video');
+  const seek = mount.querySelector('#mp-seek');
+  const timeEl = mount.querySelector('#mp-time');
+  const toggle = mount.querySelector('#mp-toggle');
+  const muteBtn = mount.querySelector('#mp-mute');
+  const volEl = mount.querySelector('#mp-vol');
+  const floatBtn = mount.querySelector('#mp-float');
+  const maxBtn = mount.querySelector('#mp-max');
+  const dragbar = mount.querySelector('#mp-dragbar');
+  const grip = mount.querySelector('#mp-resize');
+
+  // ---- 基础播放控制 ----
+  const fmt = (s) => {
+    if (!Number.isFinite(s)) return '0:00';
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  };
+  const sync = () => {
+    timeEl.textContent = `${fmt(video.currentTime)} / ${fmt(video.duration)}`;
+    if (video.duration) seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
+  };
+  const setIcon = () => { toggle.textContent = video.paused ? '▶' : '❚❚'; };
+
+  toggle.onclick = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
+  video.onclick = () => toggle.onclick();
+  video.onplay = setIcon;
+  video.onpause = setIcon;
+  video.ontimeupdate = sync;
+  video.onloadedmetadata = sync;
+  video.ondurationchange = sync;
+  seek.oninput = () => {
+    if (video.duration) video.currentTime = (Number(seek.value) / 1000) * video.duration;
+  };
+  muteBtn.onclick = () => {
+    video.muted = !video.muted;
+    muteBtn.textContent = video.muted ? '🔇' : '🔊';
+  };
+  volEl.oninput = () => { video.volume = Number(volEl.value); };
+
+  // ---- 尺寸模式：内嵌 / 浮动 / 网页内最大化 ----
+  const MARGIN = 8, MIN_W = 280, MIN_H = 180;
+  let mode = 'inline';
+  let geom = null;
+
+  const clamp = (g) => {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const w = Math.min(Math.max(g.w, MIN_W), Math.max(MIN_W, vw - MARGIN * 2));
+    const h = Math.min(Math.max(g.h, MIN_H), Math.max(MIN_H, vh - MARGIN * 2));
+    const x = Math.min(Math.max(g.x, MARGIN), Math.max(MARGIN, vw - w - MARGIN));
+    const y = Math.min(Math.max(g.y, MARGIN), Math.max(MARGIN, vh - h - MARGIN));
+    return { x, y, w, h };
+  };
+  const apply = (g) => {
+    shell.style.left = `${g.x}px`; shell.style.top = `${g.y}px`;
+    shell.style.width = `${g.w}px`; shell.style.height = `${g.h}px`;
+  };
+  const read = () => {
+    const x = parseFloat(shell.style.left), y = parseFloat(shell.style.top);
+    const w = parseFloat(shell.style.width), h = parseFloat(shell.style.height);
+    return [x, y, w, h].every(Number.isFinite) ? clamp({ x, y, w, h }) : null;
+  };
+  const defaultGeom = () => {
+    const w = Math.min(560, window.innerWidth - MARGIN * 2);
+    const h = Math.round((w * 9) / 16) + 40;
+    return clamp({ x: window.innerWidth - w - 24, y: window.innerHeight - h - 24, w, h });
+  };
+
+  const setMode = (next) => {
+    if (mode === 'floating' && next !== 'floating') {
+      const g = read(); if (g) geom = g;
+    }
+    mode = next;
+    shell.classList.toggle('mp-floating', next === 'floating');
+    shell.classList.toggle('mp-maximized', next === 'maximized');
+    if (next === 'floating') { apply(clamp(geom || defaultGeom())); }
+    else {
+      shell.style.left = ''; shell.style.top = '';
+      shell.style.width = ''; shell.style.height = '';
+    }
+    floatBtn.classList.toggle('pl-on', next === 'floating');
+    maxBtn.classList.toggle('pl-on', next === 'maximized');
+    maxBtn.textContent = next === 'maximized' ? '❐' : '⛶';
+    maxBtn.title = next === 'maximized' ? '还原播放器' : '网页内最大化';
+  };
+
+  floatBtn.onclick = () => setMode(mode === 'floating' ? 'inline' : 'floating');
+  maxBtn.onclick = () => setMode(mode === 'maximized' ? 'inline' : 'maximized');
+  mount.querySelector('#mp-close').onclick = (e) => { e.stopPropagation(); setMode('inline'); };
+
+  // ---- 拖动 / 缩放（pointer 事件，鼠标与触摸同一套）----
+  function bindDrag(handle, kind) {
+    let active = null;
+    handle.addEventListener('pointerdown', (e) => {
+      if (mode !== 'floating') return;
+      if (kind === 'drag' && e.target.closest && e.target.closest('button')) return;
+      const g = read(); if (!g) return;
+      e.preventDefault();
+      active = { sx: e.clientX, sy: e.clientY, g, ratio: g.h / g.w };
+      try { handle.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
+      shell.classList.add(kind === 'resize' ? 'mp-resizing' : 'mp-dragging');
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!active) return;
+      const dx = e.clientX - active.sx, dy = e.clientY - active.sy, g0 = active.g;
+      let g;
+      if (kind === 'resize') {
+        // 默认锁比例；按住 Shift 自由变形
+        if (e.shiftKey) g = { x: g0.x, y: g0.y, w: g0.w + dx, h: g0.h + dy };
+        else {
+          const r = active.ratio || 9 / 16;
+          const w = g0.w + dx;
+          g = { x: g0.x, y: g0.y, w, h: Math.round(w * r) };
+        }
+        // 贴边时按比例回缩，避免右下角顶出视口
+        if (g.x + g.w > window.innerWidth - MARGIN || g.y + g.h > window.innerHeight - MARGIN) {
+          const cw = Math.min(g.w, window.innerWidth - g.x - MARGIN);
+          const ch = Math.min(g.h, window.innerHeight - g.y - MARGIN);
+          const s = Math.min(cw / g.w, ch / g.h);
+          if (s < 1) g = { x: g.x, y: g.y, w: Math.round(g.w * s), h: Math.round(g.h * s) };
+        }
+      } else {
+        g = { x: g0.x + dx, y: g0.y + dy, w: g0.w, h: g0.h };
+      }
+      apply(clamp(g));
+    });
+    const end = (e) => {
+      if (!active) return;
+      active = null;
+      try { handle.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+      shell.classList.remove('mp-dragging', 'mp-resizing');
+      const g = read(); if (g) geom = g;
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+  }
+  bindDrag(dragbar, 'drag');
+  bindDrag(grip, 'resize');
+
+  // 视口变化时把浮动窗夹回可见区域
+  const reclamp = () => { if (mode === 'floating') { const g = read(); if (g) apply(clamp(g)); } };
+  window.addEventListener('resize', reclamp);
+
+  // 关闭时解绑，避免监听器泄漏
+  const origRemove = mount.remove.bind(mount);
+  mount.remove = () => { window.removeEventListener('resize', reclamp); origRemove(); };
+
+  video.play().catch(() => { /* 自动播放可能被拦，用户点一下即可 */ });
+  setIcon();
+  return { video, setMode };
+}

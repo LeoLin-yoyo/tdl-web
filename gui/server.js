@@ -18,6 +18,7 @@ const resolve = require('./lib/resolve');
 const tdlfetch = require('./lib/tdlfetch');
 const auth = require('./lib/auth');
 const qrrender = require('./lib/qrrender');
+const office = require('./lib/office');
 
 // 认证初始化：迁移旧账号 / 按环境变量引导建号。
 // 返回是否需要登录 —— 只有 data/auth.json 存在且有值时才需要（见 lib/auth.js）。
@@ -501,6 +502,13 @@ async function api(req, res, pathname, searchParams) {
   // CSRF 令牌校验由上层统一门禁处理，这里只管业务。
   if (method === 'GET' && p === '/api/files/storage') {
     return sendJson(res, 200, config.storageOverview());
+  }
+  // Office 在线预览：把文档转成 PDF 再交给浏览器内置阅读器。
+  // 转换依赖 LibreOffice（soffice）。没装时返回明确的不可用原因，
+  // 前端据此降级为「下载后本地查看」，而不是给一个空白框。
+  if (method === 'GET' && p === '/api/files/office') {
+    const sub = String(searchParams.get('path') || '');
+    return sendJson(res, 200, await office.convert(sub));
   }
   if (method === 'GET' && p === '/api/files/text') {
     return sendJson(res, 200, files.readText(String(searchParams.get('path') || '')));

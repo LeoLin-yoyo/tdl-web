@@ -566,3 +566,92 @@ details.adv .adv-body { padding-top: 10px; }
 /* 接近或超过上限时变红，让用户一眼看出该清理了 */
 .usage-fill.danger { background: linear-gradient(90deg, #e0563f, #ff8a65); }
 .usage-nums { font-size: 12.5px; line-height: 1.9; }
+
+/* ---- 文件管理器 ---------------------------------------------------------- */
+.fm-toolbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.fm-actions { margin-left: auto; display: flex; gap: 8px; }
+.fm-filter { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.fm-filter input {
+  flex: 1; max-width: 320px; background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 6px;
+  color: var(--text); padding: 6px 10px; font-size: 13px;
+}
+.fm-table td.fm-row-actions { text-align: right; white-space: nowrap; }
+/* 行内小按钮：默认半透明，悬停整行时才完全显示，界面不至于太吵 */
+.fm-row-actions .btn.xs { opacity: .55; transition: opacity .15s ease; }
+.fm-table tr:hover .fm-row-actions .btn.xs { opacity: 1; }
+.fm-name { cursor: pointer; }
+.fm-name:hover { color: var(--accent); }
+.btn.xs { padding: 2px 8px; font-size: 11.5px; }
+.btn.danger { color: #ff8a7a; border-color: rgba(255,110,90,.35); }
+.btn.danger:hover { background: rgba(255,110,90,.12); }
+.fm-modal-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+.fm-editor {
+  width: 100%; min-height: 52vh; resize: vertical;
+  background: #0d1117; color: #d6e2f0; border: 1px solid rgba(255,255,255,.12);
+  border-radius: 6px; padding: 12px; font-size: 13px; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* ---- 通用小播放器（文件页预览）------------------------------------------ */
+.mini-player {
+  position: relative; background: #000; border-radius: 8px; overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.mini-player video { width: 100%; max-height: 62vh; display: block; background: #000; position: relative; z-index: 1; }
+.mp-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: rgba(0,0,0,.72); position: relative; z-index: 4;
+}
+.mp-time { font-size: 11.5px; color: #cfd9e6; min-width: 84px; }
+.mp-seek { flex: 1; accent-color: var(--accent); cursor: pointer; }
+.mp-vol { width: 70px; accent-color: var(--accent); cursor: pointer; }
+/* 拖动条 / 缩放把手，只在浮动窗模式出现 */
+.mp-dragbar {
+  display: none; position: absolute; left: 0; right: 0; top: 0; height: 26px; z-index: 6;
+  align-items: center; gap: 8px; padding: 0 8px;
+  background: linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,0));
+  color: #e8eefc; font-size: 12px; cursor: move;
+}
+.mp-dots { opacity: .6; letter-spacing: -2px; }
+.mp-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-hint { margin-left: auto; font-size: 11px; opacity: .6; white-space: nowrap; }
+.mp-x { background: none; border: none; color: #e8eefc; cursor: pointer; font-size: 13px; }
+.mp-x:hover { color: #ff7a7a; }
+.mp-resize {
+  display: none; position: absolute; right: 0; bottom: 0; width: 34px; height: 34px; z-index: 6;
+  cursor: nwse-resize; touch-action: none;
+  /* 只让斜纹所在的右下角扇形区域接收指针事件，其余部分放行：
+     34×34 的把手正好压在控制条最后一个按钮（最大化）上，整块吃掉事件
+     会让那个按钮点不动。用 clip-path 裁成三角形即可两全。 */
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  pointer-events: auto;
+}
+.mp-resize::before {
+  content: ''; position: absolute; inset: 0;
+  background:
+    linear-gradient(135deg, transparent 0 46%, rgba(255,255,255,.75) 46% 54%, transparent 54%),
+    linear-gradient(135deg, transparent 0 66%, rgba(255,255,255,.75) 66% 74%, transparent 74%),
+    linear-gradient(135deg, transparent 0 86%, rgba(255,255,255,.75) 86% 94%, transparent 94%);
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.8)); pointer-events: none;
+}
+.mini-player.mp-floating {
+  position: fixed; z-index: 900; box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.14);
+}
+.mini-player.mp-floating .mp-dragbar { display: flex; }
+.mini-player.mp-floating .mp-resize { display: block; }
+.mini-player.mp-floating video { max-height: none; flex: 1; min-height: 0; object-fit: contain; }
+.mini-player.mp-maximized {
+  position: fixed; inset: 0; z-index: 950; border-radius: 0;
+}
+.mini-player.mp-maximized video { max-height: none; flex: 1; min-height: 0; object-fit: contain; }
+.mini-player.mp-maximized .mp-dragbar,
+.mini-player.mp-maximized .mp-resize { display: none; }
+.mini-player.mp-dragging, .mini-player.mp-resizing { user-select: none; }
