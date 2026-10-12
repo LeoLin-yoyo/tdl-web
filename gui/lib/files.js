@@ -104,6 +104,11 @@ function safeName(name) {
   if (!s || s === '.' || s === '..') return null;
   if (/[\\/]/.test(s)) return null;             // 不允许用名称夹带路径
   if (/[\x00-\x1f<>:"|?*]/.test(s)) return null; // 控制字符与 Windows 非法字符
+  // 拒绝百分号：`%2f` 这类编码在静态/代理层有可能被再解一次，
+  // 变成真正的 `/` 从而把「一个名字」变回「一条路径」。
+  // 现在虽然不逃逸（见对抗测试），但让这种名字根本建不出来更干净，
+  // 也省得用户困惑「为什么目录叫 ..%2f..%2fescape」。
+  if (/%/.test(s)) return null;
   if (s.length > 255) return null;
   return s;
 }
