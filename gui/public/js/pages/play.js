@@ -5,12 +5,22 @@
 
 import { api, esc, fmtBytes, registerRoute, toast, store } from '../app.js';
 
+// 播放器尺寸模式（三选一，互斥）：
+//   'inline'    —— 嵌在卡片里（默认）
+//   'floating'  —— 浮动窗：脱离文档流、可拖动、可缩放、右下角常驻
+//   'maximized' —— 网页内最大化：铺满浏览器视口（不是显示器全屏）
+//
+// 注意与浏览器原生全屏（requestFullscreen）的区别：原生全屏会占用整块
+// 显示器并拦截 Esc，是"离开网页"的行为；这里两种模式都仍在网页内，
+// 只是改变播放器在页面中的占位。
 const state = {
   session: null,          // last snapshot from the server
   playingIdx: -1,
   downloadFor: null,      // sid a 边看边下 task was already created for
   parsing: false,
   mediaOnly: false,
+  sizeMode: 'inline',     // 播放器尺寸模式，见上
+  floatGeom: null,        // 浮动窗几何 {x,y,w,h}，跨文件/跨页面切换保留
 };
 
 let hud = null;      // active player wiring (cleared when the page unmounts)
@@ -140,6 +150,119 @@ function showUi(shell, sticky = false) {
   }, 2600);
 }
 
+// ---- 尺寸模式：浮动窗 / 网页内最大化 ---------------------------------------
+//
+// 一段说明为什么不用 <dialog> 或拖拽库：播放器里有一个正在播放的 <video>，
+// 任何"重建 DOM"的做法（innerHTML、移动节点到别处再放回）都会让浏览器
+// 卸载并重新加载视频源，导致播放中断、进度归零。所以这里**只切换 class**
+// 与内联样式，DOM 结构在会话期间始终不变，视频流不断。
+
+const FLOAT_MIN_W = 280;
+const FLOAT_MIN_H = 180;
+const FLOAT_MARGIN = 8;   // 浮动窗与视口边缘至少留这么多像素
+
+// 把浮动窗夹回视口内：拖到屏幕外就再也抓不回来的窗口是没法用的。
+function clampFloat(g) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(Math.max(g.w, FLOAT_MIN_W), Math.max(FLOAT_MIN_W, vw - FLOAT_MARGIN * 2));
+  const h = Math.min(Math.max(g.h, FLOAT_MIN_H), Math.max(FLOAT_MIN_H, vh - FLOAT_MARGIN * 2));
+  const x = Math.min(Math.max(g.x, FLOAT_MARGIN), Math.max(FLOAT_MARGIN, vw - w - FLOAT_MARGIN));
+  const y = Math.min(Math.max(g.y, FLOAT_MARGIN), Math.max(FLOAT_MARGIN, vh - h - FLOAT_MARGIN));
+  return { x, y, w, h };
+}
+
+// 默认位置：右下角，宽 480，按 16:9 推高
+function defaultFloat() {
+  const w = Math.min(480, window.innerWidth - FLOAT_MARGIN * 2);
+  const h = Math.round((w * 9) / 16);
+  return clampFloat({
+    x: window.innerWidth - w - 24,
+    y: window.innerHeight - h - 24,
+    w,
+    h,
+  });
+}
+
+// 几何持久化：拖动/缩放后记住，播放会话内切换模式不丢。
+const FLOAT_KEY = 'tdlweb.player.float';
+
+function saveFloatGeom(g) {
+  state.floatGeom = g;
+  try { localStorage.setItem(FLOAT_KEY, JSON.stringify(g)); } catch { /* 隐私模式等 */ }
+}
+
+function loadFloatGeom() {
+  try {
+    const raw = localStorage.getItem(FLOAT_KEY);
+    if (!raw) return null;
+    const g = JSON.parse(raw);
+    if (!g || !Number.isFinite(g.w) || !Number.isFinite(g.h)) return null;
+    return g;
+  } catch { return null; }
+}
+
+// 拖动 / 缩放：用 pointer 事件 + setPointerCapture，鼠标与触摸同一套代码。
+// 只在用户真正按下拖动柄时才改坐标，不去监听视频区域的点击（那要留给播放/暂停）。
+function makeDragHandle(shell, handle, mode, getGeom, onDone) {
+  if (!handle) return;
+  let active = null;
+  handle.addEventListener('pointerdown', (e) => {
+    if (state.sizeMode !== 'floating') return;
+    // 拖动条里嵌着按钮（✕）：点在按钮上时不要开始拖动，
+    // 否则 setPointerCapture 会把后续事件全抢走，按钮的 click 永远收不到
+    // ——实测「点✕关不掉浮动窗」就是这个原因。
+    if (mode === 'drag' && e.target && e.target.closest && e.target.closest('button')) return;
+    const g = getGeom();
+    if (!g) return;
+    e.preventDefault();
+    active = { startX: e.clientX, startY: e.clientY, g };
+    try { handle.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
+    shell.classList.add(mode === 'resize' ? 'pl-resizing' : 'pl-dragging');
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (!active) return;
+    const dx = e.clientX - active.startX;
+    const dy = e.clientY - active.startY;
+    const g0 = active.g;
+    let g;
+    if (mode === 'resize') {
+      g = { x: g0.x, y: g0.y, w: g0.w + dx, h: g0.h + dy };
+    } else {
+      g = { x: g0.x + dx, y: g0.y + dy, w: g0.w, h: g0.h };
+    }
+    const c = clampFloat(g);
+    applyFloatGeometry(shell, c);
+    onDone(c, false);
+  });
+  const end = (e) => {
+    if (!active) return;
+    active = null;
+    try { handle.releasePointerCapture(e.pointerId); } catch { /* 已释放 */ }
+    shell.classList.remove('pl-dragging', 'pl-resizing');
+    const g = readFloatGeometry(shell);
+    if (g) onDone(g, true);
+  };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+
+function applyFloatGeometry(shell, g) {
+  shell.style.left = `${g.x}px`;
+  shell.style.top = `${g.y}px`;
+  shell.style.width = `${g.w}px`;
+  shell.style.height = `${g.h}px`;
+}
+
+function readFloatGeometry(shell) {
+  const x = parseFloat(shell.style.left);
+  const y = parseFloat(shell.style.top);
+  const w = parseFloat(shell.style.width);
+  const h = parseFloat(shell.style.height);
+  if (![x, y, w, h].every(Number.isFinite)) return null;
+  return clampFloat({ x, y, w, h });
+}
+
 function setupPlayer(view) {
   const shell = view.querySelector('#player-shell');
   const video = view.querySelector('#player');
@@ -156,8 +279,97 @@ function setupPlayer(view) {
   const muteBtn = view.querySelector('#pl-mute');
   const volEl = view.querySelector('#pl-vol');
   const fsBtn = view.querySelector('#pl-fs');
+  const floatBtn = view.querySelector('#pl-float');
+  const maxBtn = view.querySelector('#pl-max');
+  const dragBar = view.querySelector('#pl-dragbar');
+  const resizeGrip = view.querySelector('#pl-resize');
+  const wrapCard = view.querySelector('#player-card');
 
   hud = { shell, video, poll: null, idx: -1, sid: '', dl: null };
+
+  // ---- 尺寸模式切换：浮动窗 / 网页内最大化 ----
+  //
+  // 三个按钮共用一个 setSizeMode，保证任意时刻只有一种模式生效。
+  // 切模式时不碰 <video>：只改 class 与几何，播放不中断。
+  const isFloat = () => state.sizeMode === 'floating';
+  const isMax = () => state.sizeMode === 'maximized';
+
+  const paintSizeButtons = () => {
+    if (floatBtn) floatBtn.classList.toggle('pl-on', isFloat());
+    if (maxBtn) maxBtn.classList.toggle('pl-on', isMax());
+    if (floatBtn) floatBtn.title = isFloat() ? '退出浮动窗（P）' : '浮动窗：可拖动、可缩放，边看边做别的（P）';
+    if (maxBtn) maxBtn.title = isMax() ? '还原播放器（Z）' : '网页内最大化：铺满浏览器窗口（Z）';
+    if (maxBtn) maxBtn.textContent = isMax() ? '❐' : '⛶';
+  };
+
+  const setSizeMode = (mode) => {
+    // 原生全屏与这两种模式互斥：从全屏里点浮动会先退出全屏，避免两层叠加。
+    if (document.fullscreenElement && mode !== 'fullscreen') {
+      document.exitFullscreen().catch(() => {});
+    }
+    if (mode === 'fullscreen') {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      else shell.requestFullscreen().catch(() => toast('无法进入全屏（浏览器限制）', 'error'));
+      return;
+    }
+
+    // 离开浮动模式前记下几何，回来时恢复（这也是"切到最大化再切回来不跳位置"的关键）
+    if (isFloat() && mode !== 'floating') {
+      const g = readFloatGeometry(shell);
+      if (g) saveFloatGeom(g);
+    }
+
+    state.sizeMode = mode;
+    shell.classList.toggle('pl-floating', mode === 'floating');
+    shell.classList.toggle('pl-maximized', mode === 'maximized');
+    view.classList.toggle('pl-has-max', mode === 'maximized');
+
+    if (mode === 'floating') {
+      const g = clampFloat(state.floatGeom || loadFloatGeom() || defaultFloat());
+      applyFloatGeometry(shell, g);
+      saveFloatGeom(g);
+      // 浮动窗脱离了卡片，卡片本身收起，免得页面里留一块空白
+      if (wrapCard) wrapCard.classList.add('pl-card-detached');
+    } else {
+      shell.style.left = '';
+      shell.style.top = '';
+      shell.style.width = '';
+      shell.style.height = '';
+      if (wrapCard) wrapCard.classList.remove('pl-card-detached');
+    }
+
+    paintSizeButtons();
+    showUi(shell);
+  };
+
+  hud.setSizeMode = setSizeMode;
+  hud.cycleFromFullscreen = () => { /* 由 fullscreenchange 填充 */ };
+
+  makeDragHandle(shell, dragBar, 'drag',
+    () => readFloatGeometry(shell),
+    (g, done) => { if (done) saveFloatGeom(g); });
+  makeDragHandle(shell, resizeGrip, 'resize',
+    () => readFloatGeometry(shell),
+    (g, done) => { if (done) saveFloatGeom(g); });
+
+  // 缩放/拖动只改了内联样式，这里把边界约束同步回去，避免拖出视口后
+  // 样式里的坐标和实际显示不一致（下一次读回来就会跳一下）。
+  const reclamp = () => {
+    if (!isFloat()) return;
+    const g = readFloatGeometry(shell);
+    if (!g) return;
+    const c = clampFloat(g);
+    applyFloatGeometry(shell, c);
+    saveFloatGeom(c);
+  };
+  hud.reclamp = reclamp;
+  window.addEventListener('resize', reclamp);
+  hud.onWindowResize = reclamp;
+
+  if (floatBtn) floatBtn.onclick = () => setSizeMode(isFloat() ? 'inline' : 'floating');
+  if (maxBtn) maxBtn.onclick = () => setSizeMode(isMax() ? 'inline' : 'maximized');
+  const dragX = view.querySelector('#pl-drag-x');
+  if (dragX) dragX.onclick = (e) => { e.stopPropagation(); setSizeMode('inline'); };
 
   // （真实接收速度的采样函数见文件顶部 sampleDownloadRate —— 那里是模块级，
   //   因为轮询逻辑在另一个函数里，需要共用。）
@@ -237,13 +449,20 @@ function setupPlayer(view) {
     muteBtn.textContent = video.muted ? '🔇' : '🔊';
   };
   volEl.oninput = () => { video.volume = Number(volEl.value); video.muted = video.volume === 0; muteBtn.textContent = video.muted ? '🔇' : '🔊'; };
-  fsBtn.onclick = () => {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else shell.requestFullscreen().catch(() => toast('无法进入全屏（浏览器限制）', 'error'));
-  };
-  document.addEventListener('fullscreenchange', () => {
+  fsBtn.onclick = () => setSizeMode('fullscreen');
+  hud.fsChangeHandler = () => {
     fsBtn.textContent = document.fullscreenElement ? '⤢' : '⛶';
-  });
+    // 原生全屏与网页内最大化是两回事，进全屏时把最大化收掉，
+    // 退出全屏后回到嵌入态，避免「全屏里套着一个最大化」的怪异层叠。
+    if (document.fullscreenElement && isMax()) {
+      state.sizeMode = 'inline';
+      shell.classList.remove('pl-maximized');
+      view.classList.remove('pl-has-max');
+      if (wrapCard) wrapCard.classList.remove('pl-card-detached');
+      paintSizeButtons();
+    }
+  };
+  document.addEventListener('fullscreenchange', hud.fsChangeHandler);
 
   // ---- resolution badge ----
   const updateRes = () => {
@@ -303,7 +522,13 @@ function setupPlayer(view) {
       case 'ArrowLeft': video.currentTime = Math.max(0, video.currentTime - 5); showUi(shell); break;
       case 'ArrowUp': video.volume = Math.min(1, video.volume + 0.05); volEl.value = String(video.volume); break;
       case 'ArrowDown': video.volume = Math.max(0, video.volume - 0.05); volEl.value = String(video.volume); break;
-      case 'f': fsBtn.onclick(); break;
+      case 'f': setSizeMode('fullscreen'); break;
+      case 'p': setSizeMode(isFloat() ? 'inline' : 'floating'); break;
+      case 'z': setSizeMode(isMax() ? 'inline' : 'maximized'); break;
+      case 'Escape':
+        // Esc 在网页内退出最大化/浮动（原生全屏的 Esc 由浏览器自己处理）
+        if (!document.fullscreenElement && (isMax() || isFloat())) { e.preventDefault(); setSizeMode('inline'); }
+        break;
       case 'm': muteBtn.onclick(); break;
       default: break;
     }
@@ -391,6 +616,8 @@ function teardownPlayer() {
   if (!hud) return;
   if (hud.poll) clearInterval(hud.poll);
   if (hud.keyHandler) document.removeEventListener('keydown', hud.keyHandler);
+  if (hud.fsChangeHandler) document.removeEventListener('fullscreenchange', hud.fsChangeHandler);
+  if (hud.onWindowResize) window.removeEventListener('resize', hud.onWindowResize);
   hud = null;
   if (hudTimer) { clearTimeout(hudTimer); hudTimer = null; }
 }
@@ -406,6 +633,8 @@ async function play(view, idx) {
   wrap.classList.remove('hidden');
   state.playingIdx = idx;
   view.querySelector('#player-title').textContent = file.name;
+  const dragTitle = view.querySelector('#pl-drag-title');
+  if (dragTitle) dragTitle.textContent = file.name;
   video.src = `/api/stream/${encodeURIComponent(sess.sid)}/${idx}`;
   video.play().catch(() => { /* autoplay may need a gesture; controls still work */ });
   renderList(view);
@@ -476,6 +705,11 @@ async function render(view) {
           <h2 id="player-title">正在播放</h2>
           <div class="player-shell" id="player-shell">
             <video id="player" playsinline preload="auto"></video>
+            <div class="pl-dragbar" id="pl-dragbar" title="按住拖动浮动窗口">
+              <span class="pl-drag-dots">⋮⋮</span>
+              <span class="pl-drag-title" id="pl-drag-title">浮动窗</span>
+              <button class="pl-drag-x" id="pl-drag-x" title="关闭浮动窗（回到页面内）">✕</button>
+            </div>
             <div class="pl-ui pl-hidden">
               <div class="pl-badge pl-res" id="pl-res">—</div>
               <div class="pl-badge pl-speed" id="pl-speed">—</div>
@@ -493,13 +727,16 @@ async function render(view) {
                   <span class="pl-grow"></span>
                   <button class="pl-btn" id="pl-mute" title="静音">🔊</button>
                   <input type="range" class="pl-vol" id="pl-vol" min="0" max="1" step="0.05" value="1" title="音量">
-                  <button class="pl-btn" id="pl-fs" title="全屏">⛶</button>
+                  <button class="pl-btn" id="pl-float" title="浮动窗：可拖动、可缩放，边看边做别的（P）">⧉</button>
+                  <button class="pl-btn" id="pl-max" title="网页内最大化：铺满浏览器窗口（Z）">⛶</button>
+                  <button class="pl-btn" id="pl-fs" title="全屏（F）">⤢</button>
                 </div>
               </div>
             </div>
+            <div class="pl-resize" id="pl-resize" title="拖动调整窗口大小"></div>
           </div>
           <div class="hint muted small" style="margin-top:6px">
-            移动鼠标显示控制条与信息；全屏后自动隐藏。快捷键：空格播放/暂停、←/→ 快退快进 5s、↑/↓ 音量、F 全屏、M 静音。
+            移动鼠标显示控制条与信息；全屏后自动隐藏。快捷键：空格播放/暂停、←/→ 快退快进 5s、↑/↓ 音量、F 全屏、M 静音、P 浮动窗、Z 网页内最大化。
           </div>
         </div>
       </div>
