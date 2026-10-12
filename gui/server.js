@@ -148,9 +148,14 @@ function serveStatic(res, pathname) {
   });
 }
 
-// 给 index.html 的入口模块打上版本号（见 staticVersion 的说明）
+// 给 index.html 的入口模块打上版本号（见 staticVersion 的说明）。
+// 原先只处理了 /js/main.js，漏了样式表：CSS 没有版本号 → 改了 style.css
+// （如播放器浮动窗/最大化的样式）浏览器仍用旧副本，表现为「JS 是新的、
+// 按钮出来了，但点击没反应 / 样式错乱」。这里把样式表一并挂上版本号。
 function tagEntryScript(html) {
-  return html.replace(/(src="\/js\/main\.js)(["'])/g, `$1?v=${staticVersion}$2`);
+  return html
+    .replace(/(src="\/js\/main\.js)(["'])/g, `$1?v=${staticVersion}$2`)
+    .replace(/(href="\/css\/[^"?]+\.css)(["'])/g, `$1?v=${staticVersion}$2`);
 }
 
 // Cloudflare 会给静态资源补上 max-age=14400（实测响应头如此），把源站的
