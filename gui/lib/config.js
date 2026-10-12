@@ -249,7 +249,10 @@ function downloadDefaults() {
   const c = load();
   const split = (s) => String(s || '').split(/[,，]/).map((x) => x.trim()).filter(Boolean);
   return {
-    dir: c.dir,
+    // 服务器模式下，默认下载目录就是受管目录 —— 否则用户在下载表单里
+    // 留空路径时，会退回「下载目录」而绕过受管目录（受管与配额一起失效）。
+    // 表单里填了值的走 buildDlArgs → resolveDownloadDir，同样落在受管目录内。
+    dir: c.serverMode ? managedRoot() : c.dir,
     template: c.template,
     include: split(c.include),
     exclude: split(c.exclude),
