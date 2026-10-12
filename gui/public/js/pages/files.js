@@ -12,7 +12,9 @@ let lastList = null;   // 最近一次列表结果，供工具栏（重命名/�
 // ---- 类型判定 --------------------------------------------------------------
 // 与后端 lib/files.js 的 TEXT_EXT / MIME 保持一致的判断，用于决定「双击打开」的行为。
 
-const IMG_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif'];
+// svg 也按图片处理：后端 MIME 已声明 image/svg+xml，内联渲染即可。
+// 注意 svg 能带脚本，但同源且是用户自己目录里的文件，与直接打开等价。
+const IMG_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'ico', 'avif', 'tiff', 'tif'];
 const VID_EXT = ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'avi', 'flv', 'wmv', 'ts', '3gp', 'ogv'];
 const AUD_EXT = ['mp3', 'm4a', 'flac', 'wav', 'ogg', 'aac', 'opus'];
 const OFFICE_EXT = ['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'rtf'];

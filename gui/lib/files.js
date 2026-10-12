@@ -8,6 +8,8 @@ const config = require('./config');
 const MIME = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
   '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.avif': 'image/avif',
+  '.tiff': 'image/tiff', '.tif': 'image/tiff',
   '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime',
   '.m4v': 'video/x-m4v', '.avi': 'video/x-msvideo', '.flv': 'video/x-flv', '.wmv': 'video/x-ms-wmv',
   '.ts': 'video/mp2t', '.3gp': 'video/3gpp', '.ogv': 'video/ogg',
