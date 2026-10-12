@@ -503,6 +503,16 @@ async function api(req, res, pathname, searchParams) {
   if (method === 'GET' && p === '/api/files/storage') {
     return sendJson(res, 200, config.storageOverview());
   }
+  // Office 预览依赖（LibreOffice）是否就绪 —— 设置页据此提示用户
+  if (method === 'GET' && p === '/api/files/capabilities') {
+    const lo = office.available();
+    return sendJson(res, 200, {
+      libreoffice: lo.ok,
+      libreofficePath: lo.path || '',
+      libreofficeHint: lo.hint || '',
+      officeExt: [...office.OFFICE_EXT],
+    });
+  }
   // Office 在线预览：把文档转成 PDF 再交给浏览器内置阅读器。
   // 转换依赖 LibreOffice（soffice）。没装时返回明确的不可用原因，
   // 前端据此降级为「下载后本地查看」，而不是给一个空白框。

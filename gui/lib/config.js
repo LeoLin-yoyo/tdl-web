@@ -299,6 +299,13 @@ let usageCache = { dir: '', at: 0, bytes: 0, files: 0 };
 let usageDirty = true;
 
 // 目录占用统计。跳过符号链接，避免链接成环时无限递归。
+// 这些隐藏目录不计入「受管目录已用」：
+//   .trash        回收站 —— 删除过的东西不该继续占用户的配额，
+//                 否则「删了文件配额却没释放」会让人完全无法理解。
+//   .office-cache Office 预览的 PDF 缓存 —— 是程序自己生成的中间产物，
+//                 算进配额等于用户的预算被预览缓存悄悄吃掉。
+const USAGE_SKIP = new Set(['.trash', '.office-cache']);
+
 function dirUsage(dir, acc = { bytes: 0, files: 0 }, depth = 0) {
   if (depth > 64) return acc; // 防御异常深的目录树
   let entries;
@@ -307,6 +314,7 @@ function dirUsage(dir, acc = { bytes: 0, files: 0 }, depth = 0) {
     const full = path.join(dir, ent.name);
     try {
       if (ent.isSymbolicLink()) continue;
+      if (USAGE_SKIP.has(ent.name)) continue;
       if (ent.isDirectory()) {
         dirUsage(full, acc, depth + 1);
       } else if (ent.isFile()) {

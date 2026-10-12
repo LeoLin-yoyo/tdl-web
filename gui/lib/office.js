@@ -26,9 +26,15 @@ const OFFICE_EXT = new Set([
   'ppt', 'pptx', 'odp',
 ]);
 
-// 缓存目录放在 data/ 下（已在 .gitignore），不污染受管目录、也不占用户配额
-const CACHE_DIR = path.join(config.DATA_DIR, 'office-cache');
-const LOG_DIR = path.join(config.DATA_DIR, 'office-profile');
+// 缓存目录必须落在**文件操作根目录内部**。
+//
+// 曾经放在 config.DATA_DIR（data/office-cache），结果是转出来的 PDF 在
+// files.root() 之外，/api/files/raw 的 safeResolve 会把 `..` 直接判为越界
+// → 400 → 预览框一片空白（接口返回 ok:true 但前端什么也看不到）。
+// 放进 root 内部的隐藏目录（.office-cache，list() 会跳过点开头的条目），
+// 既能被 raw 接口正常读到，又不会出现在文件列表里。
+function cacheDir() { return path.join(files.root(), '.office-cache'); }
+function logDir() { return path.join(config.DATA_DIR, 'office-profile'); }
 
 let sofficePath;   // undefined = 还没探测过；null = 探测过但没找到
 
@@ -125,6 +131,7 @@ async function convert(sub) {
   if (!chk.ok) return { ok: false, error: `容量不足，无法生成预览缓存：${chk.message}` };
 
   const key = cacheKey(info.target, st);
+  const CACHE_DIR = cacheDir();
   const outPdf = path.join(CACHE_DIR, `${key}.pdf`);
   const relCache = path.relative(files.root(), outPdf);
 
@@ -137,12 +144,12 @@ async function convert(sub) {
   } catch { /* 没缓存，继续转 */ }
 
   fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.mkdirSync(LOG_DIR, { recursive: true });
+  fs.mkdirSync(logDir(), { recursive: true });
 
   const result = await enqueue(() => runSoffice(bin, [
     '--headless', '--norestore', '--invisible',
     // 独立的用户配置目录：避免与用户自己开的 LibreOffice 抢锁
-    `-env:UserInstallation=file://${LOG_DIR}`,
+    `-env:UserInstallation=file://${logDir()}`,
     '--convert-to', 'pdf',
     '--outdir', CACHE_DIR,
     info.target,
@@ -171,6 +178,7 @@ function pruneCache(maxAgeMs = 7 * 24 * 3600 * 1000) {
   let removed = 0, freed = 0;
   try {
     const now = Date.now();
+    const CACHE_DIR = cacheDir();
     for (const ent of fs.readdirSync(CACHE_DIR, { withFileTypes: true })) {
       if (!ent.isFile()) continue;
       const full = path.join(CACHE_DIR, ent.name);
@@ -183,4 +191,4 @@ function pruneCache(maxAgeMs = 7 * 24 * 3600 * 1000) {
   return { removed, freed };
 }
 
-module.exports = { convert, available, findSoffice, pruneCache, OFFICE_EXT, CACHE_DIR };
+module.exports = { convert, available, findSoffice, pruneCache, OFFICE_EXT, cacheDir, logDir };

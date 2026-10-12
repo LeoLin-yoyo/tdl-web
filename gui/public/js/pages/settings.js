@@ -29,6 +29,9 @@ async function render(view) {
 
       <h2 style="font-size:13.5px;margin:22px 0 10px">容量使用情况</h2>
       <div id="st-usage"><div class="empty"><span class="spin">◐</span> 读取中…</div></div>
+
+      <h2 style="font-size:13.5px;margin:22px 0 10px">文档在线预览能力</h2>
+      <div id="st-cap"><div class="empty"><span class="spin">◐</span> 检测中…</div></div>
     </div>
 
     <div class="grid c2">
@@ -241,6 +244,38 @@ async function render(view) {
   };
 
   await drawUsage();
+
+  // ---- 文档在线预览能力（要不要装 LibreOffice）----------------------------
+  const capBox = view.querySelector('#st-cap');
+  async function drawCap() {
+    let c;
+    try {
+      c = await api('/api/files/capabilities');
+    } catch (e) {
+      capBox.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+      return;
+    }
+    const ext = (c.officeExt || []).map((e) => `.${e}`).join(' ');
+    capBox.innerHTML = `
+      <div class="usage-panel">
+        <div class="usage-nums">
+          <div style="margin-bottom:6px">
+            <b>LibreOffice</b>：
+            ${c.libreoffice
+              ? `<span style="color:var(--ok)">已就绪</span> <span class="muted mono">${esc(c.libreofficePath)}</span>`
+              : `<span style="color:#ff8a65">未安装</span>`}
+          </div>
+          ${c.libreoffice ? '' : `<div class="hint muted small" style="margin-bottom:8px">${esc(c.libreofficeHint)}</div>`}
+          <div class="hint muted small" style="margin-bottom:6px">
+            支持在线预览：${esc(ext)}<br>
+            未安装时，这些格式仍可下载后本地查看，其他功能不受影响。
+          </div>
+          <button class="btn sm" id="st-cap-refresh">重新检测</button>
+        </div>
+      </div>`;
+    capBox.querySelector('#st-cap-refresh').onclick = drawCap;
+  }
+  await drawCap();
 
   // ---- tdl path / auto-download -------------------------------------------
   const tdlCur = view.querySelector('#s-tdlcur');
