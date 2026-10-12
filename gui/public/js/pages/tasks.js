@@ -4,7 +4,11 @@
 import { api, esc, fmtBytes, store, notify, listeners, registerRoute, toast, modal } from '../app.js';
 import { renderTaskList, pickChat, val, checked, numVal, lines } from '../components.js';
 
-const defaults = () => store.config || {};
+// 表单默认值取「经服务器模式换算后的生效值」（downloadDefaults），
+// 而不是原始 config。服务器模式下受管目录才是正确落点，
+// 直接读 config.dir 会把下载目录预填进去，让用户以为文件会存到那里。
+// 拿不到 downloadDefaults 时（旧后端）退回原行为，不至于白屏。
+const defaults = () => ({ ...(store.config || {}), ...(store.downloadDefaults || {}) });
 
 function formCard(title, inner, submitLabel = '创建任务') {
   return `

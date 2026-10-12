@@ -325,20 +325,34 @@ async function api(req, res, pathname, searchParams) {
     return sendJson(res, 200, {
       version: versionCache.text,
       config: config.load(),
+      // 下载表单要用「经服务器模式换算后的目录」，见下方 configPayload 的说明
+      downloadDefaults: config.downloadDefaults(),
       login: login.publicState(),
       queue: tdl.queueInfo(),
       sse: sseClients.size,
     });
   }
+  // 除了原始配置，一并下发 downloadDefaults()：
+  // 它是「经过服务器模式换算后的生效值」。前端若直接读 config.dir，
+  // 在服务器模式下会拿到下载目录而不是受管目录，新建下载任务的表单
+  // 就会预填错误的路径 —— 服务端与界面必须用同一个真相来源。
+  const configPayload = () => ({
+    config: config.load(),
+    downloadDefaults: config.downloadDefaults(),
+  });
   if (method === 'GET' && p === '/api/config') {
-    return sendJson(res, 200, { config: config.load() });
+    return sendJson(res, 200, configPayload());
   }
   if (method === 'POST' && p === '/api/config') {
     const body = await readBody(req);
     const next = config.save(body.config || {});
     // a changed tdl path must take effect immediately, not after a restart
     resolveTdl();
-    return sendJson(res, 200, { config: next, tdlPath: global.TDL_PATH, tdlFound: !!config.locateTdl() });
+    return sendJson(res, 200, {
+      ...configPayload(),
+      tdlPath: global.TDL_PATH,
+      tdlFound: !!config.locateTdl(),
+    });
   }
   // ---- tdl auto-download (lib/tdlfetch.js) ----
   if (method === 'GET' && p === '/api/tdl/status') {

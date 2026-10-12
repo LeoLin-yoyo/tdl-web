@@ -161,6 +161,8 @@ async function render(view) {
     try {
       const r = await api('/api/config', { method: 'POST', body: { config: patch } });
       store.config = r.config;
+      // 保存后生效目录可能已变（如刚开启服务器模式），同步刷新
+      store.downloadDefaults = r.downloadDefaults || null;
       toast('已保存', 'ok');
       return r;
     } catch (e) {

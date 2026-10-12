@@ -183,6 +183,8 @@ export async function loadTasks() {
 export async function loadStatus() {
   const r = await api('/api/status');
   store.config = r.config;
+  // 生效值（服务器模式下会把下载目录换成受管目录）。表单用它做默认值。
+  store.downloadDefaults = r.downloadDefaults || null;
   store.version = r.version;
   store.login = r.login;
   store.queue = r.queue;
