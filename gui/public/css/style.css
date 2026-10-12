@@ -472,7 +472,13 @@ details.adv .adv-body { padding-top: 10px; }
 .player-shell.pl-floating .pl-dragbar { display: flex; }
 .pl-drag-dots { opacity: .6; letter-spacing: -2px; }
 .pl-drag-title {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 浮动窗操作提示：让"能拖动、能缩放"这件事一眼可见（之前只在 title 里，
+   用户根本不会去悬停看，于是以为没实现缩放）。 */
+.pl-drag-hint {
+  margin-left: auto; flex: 0 0 auto; font-size: 11px; opacity: .62;
+  padding-left: 10px; white-space: nowrap;
 }
 .pl-drag-x {
   background: none; border: none; color: #e8eefc; cursor: pointer;
@@ -480,15 +486,34 @@ details.adv .adv-body { padding-top: 10px; }
 }
 .pl-drag-x:hover { color: #ff7a7a; }
 
-/* 右下角缩放把手 */
+/* 右下角缩放把手。
+   注意命中区：18px 的三角在 4K 屏上几乎抓不住（旧版就是这样，用户反馈
+   "浮动之后没发现有缩放"）。这里把可视三角保持在右下角，但用 ::after 把
+   可点击区域扩大到 34×34，并把可见线条画得更清楚。
+   （.pl-track 当年同样靠 ::before 扩大命中区，这里沿用同一思路。） */
 .pl-resize {
   display: none;
-  position: absolute; right: 0; bottom: 0; width: 18px; height: 18px; z-index: 5;
+  position: absolute; right: 0; bottom: 0; width: 34px; height: 34px; z-index: 6;
   cursor: nwse-resize;
-  background:
-    linear-gradient(135deg, transparent 0 45%, rgba(255,255,255,.55) 45% 55%, transparent 55%),
-    linear-gradient(135deg, transparent 0 70%, rgba(255,255,255,.35) 70% 80%, transparent 80%);
+  touch-action: none;   /* 触摸设备上避免拖动时触发页面滚动 */
 }
+/* 可视的斜线三角 */
+.pl-resize::before {
+  content: ''; position: absolute; right: 0; bottom: 0; width: 100%; height: 100%;
+  background:
+    linear-gradient(135deg, transparent 0 46%, rgba(255,255,255,.75) 46% 54%, transparent 54%),
+    linear-gradient(135deg, transparent 0 66%, rgba(255,255,255,.75) 66% 74%, transparent 74%),
+    linear-gradient(135deg, transparent 0 86%, rgba(255,255,255,.75) 86% 94%, transparent 94%);
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.8));
+  pointer-events: none;
+}
+/* 悬停时整块高亮，明确告诉用户"这里可以拖" */
+.pl-resize::after {
+  content: ''; position: absolute; right: 0; bottom: 0; width: 34px; height: 34px;
+  background: radial-gradient(circle at 100% 100%, rgba(42,171,238,.45), transparent 70%);
+  opacity: 0; transition: opacity .15s ease; pointer-events: none;
+}
+.pl-resize:hover::after { opacity: 1; }
 .player-shell.pl-floating .pl-resize { display: block; }
 
 /* 播放器变成浮动窗后，卡片本体不再占位（否则页面留一块空白） */

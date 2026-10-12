@@ -216,7 +216,7 @@ function makeDragHandle(shell, handle, mode, getGeom, onDone) {
     const g = getGeom();
     if (!g) return;
     e.preventDefault();
-    active = { startX: e.clientX, startY: e.clientY, g };
+    active = { startX: e.clientX, startY: e.clientY, g, ratio: g.h / g.w };
     try { handle.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
     shell.classList.add(mode === 'resize' ? 'pl-resizing' : 'pl-dragging');
   });
@@ -227,7 +227,25 @@ function makeDragHandle(shell, handle, mode, getGeom, onDone) {
     const g0 = active.g;
     let g;
     if (mode === 'resize') {
-      g = { x: g0.x, y: g0.y, w: g0.w + dx, h: g0.h + dy };
+      // 默认锁定 16:9（跟随视频区域的常见比例），按住 Shift 可自由变形。
+      // 锁定比例能避免用户随手一拖就把画面拉变形；需要精确控制时用 Shift。
+      if (e.shiftKey) {
+        g = { x: g0.x, y: g0.y, w: g0.w + dx, h: g0.h + dy };
+      } else {
+        // 以宽为准推算高，保持初始宽高比
+        const ratio = active.ratio || (g0.h / g0.w) || 9 / 16;
+        const w = g0.w + dx;
+        g = { x: g0.x, y: g0.y, w, h: Math.round(w * ratio) };
+      }
+      // 缩放到与视口边缘贴合时，把窗口也拉回视口内（否则右下角会顶出去）
+      if (g.x + g.w > window.innerWidth - FLOAT_MARGIN || g.y + g.h > window.innerHeight - FLOAT_MARGIN) {
+        const clampedW = Math.min(g.w, window.innerWidth - g.x - FLOAT_MARGIN);
+        const clampedH = Math.min(g.h, window.innerHeight - g.y - FLOAT_MARGIN);
+        const shrink = Math.min(clampedW / g.w, clampedH / g.h);
+        if (shrink < 1) {
+          g = { x: g.x, y: g.y, w: Math.round(g.w * shrink), h: Math.round(g.h * shrink) };
+        }
+      }
     } else {
       g = { x: g0.x + dx, y: g0.y + dy, w: g0.w, h: g0.h };
     }
@@ -708,6 +726,7 @@ async function render(view) {
             <div class="pl-dragbar" id="pl-dragbar" title="按住拖动浮动窗口">
               <span class="pl-drag-dots">⋮⋮</span>
               <span class="pl-drag-title" id="pl-drag-title">浮动窗</span>
+              <span class="pl-drag-hint">拖动标题栏移动 · 拖右下角缩放</span>
               <button class="pl-drag-x" id="pl-drag-x" title="关闭浮动窗（回到页面内）">✕</button>
             </div>
             <div class="pl-ui pl-hidden">
