@@ -5,6 +5,32 @@ import { api, esc, store, registerRoute, toast, fmtTime, setCsrfToken } from '..
 async function render(view) {
   const cfg = store.config || {};
   view.innerHTML = `
+    <div class="card" id="storage-card">
+      <h2>文件服务（服务器模式）</h2>
+      <div class="hint muted small" style="margin-bottom:12px">
+        下载的文件落在远端服务器上，本地拿不到。开启<strong>服务器模式</strong>后，下载与
+        「文件」页都收拢到同一个<strong>受管目录</strong>里：下载表单填的路径一律当作
+        <strong>相对受管目录</strong>的路径，文件页的增删改查也限定在这个目录内，并可对
+        整个目录设容量上限。
+      </div>
+      <label class="check-row" style="font-size:13.5px">
+        <input type="checkbox" id="st-servermode" ${cfg.serverMode ? 'checked' : ''}>
+        启用服务器模式（下载路径改为相对受管目录，文件操作限定在受管目录内）
+      </label>
+      <div class="grid c2" style="margin-top:12px">
+        <div class="field"><label>受管目录（留空＝自动创建 gui/data/managed）</label>
+          <input type="text" id="st-manageddir" value="${esc(cfg.managedDir || '')}" placeholder="留空则自动创建，例如 /data/share">
+          <span class="hint">填任意可写目录路径即可接管；不填则程序自行创建默认目录</span></div>
+        <div class="field"><label>目录容量上限（GB，0＝不限制）</label>
+          <input type="number" id="st-quota" value="${cfg.managedQuotaGB ?? 0}" min="0" step="1">
+          <span class="hint">超过上限后不再写入新文件（受管目录自身容量，与机器剩余空间取更严者）</span></div>
+      </div>
+      <button class="btn primary" id="st-save">保存文件服务设置</button>
+
+      <h2 style="font-size:13.5px;margin:22px 0 10px">容量使用情况</h2>
+      <div id="st-usage"><div class="empty"><span class="spin">◐</span> 读取中…</div></div>
+    </div>
+
     <div class="grid c2">
       <div class="card">
         <h2>连接与存储</h2>
@@ -141,6 +167,80 @@ async function render(view) {
       if (btn) btn.disabled = false;
     }
   }
+
+  // ---- 文件服务（服务器模式 / 受管目录 / 容量）----------------------------
+  const usageBox = view.querySelector('#st-usage');
+
+  // 把字节数显示成带单位、带两位小数的可读形式
+  function gb(n) {
+    const v = Number(n) || 0;
+    if (v >= 1024 ** 4) return `${(v / 1024 ** 4).toFixed(2)} TB`;
+    if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(2)} GB`;
+    if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(1)} MB`;
+    if (v >= 1024) return `${(v / 1024).toFixed(1)} KB`;
+    return `${v} B`;
+  }
+
+  async function drawUsage() {
+    let st;
+    try {
+      st = await api('/api/files/storage');
+    } catch (e) {
+      usageBox.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+      return;
+    }
+    const pct = (a, b) => (b > 0 ? Math.min(100, (a / b) * 100) : 0);
+    const bar = (p, cls) => `
+      <div class="usage-bar"><div class="usage-fill ${cls || ''}" style="width:${p.toFixed(1)}%"></div></div>`;
+
+    const disk = st.disk || {};
+    const diskPct = pct(disk.used, disk.total);
+    const quotaPct = st.quotaBytes > 0 ? st.quotaUsedPct : 0;
+
+    usageBox.innerHTML = `
+      <div class="grid c2">
+        <div class="usage-panel">
+          <div class="usage-title">机器磁盘（<span class="mono">${esc(disk.path || '')}</span>）</div>
+          ${bar(diskPct, diskPct > 90 ? 'danger' : '')}
+          <div class="usage-nums">
+            已用 <b>${gb(disk.used)}</b> ／ 可用 <b style="color:var(--ok)">${gb(disk.free)}</b> ／ 总计 <b>${gb(disk.total)}</b>
+            <span class="muted">（${diskPct.toFixed(1)}%）</span>
+          </div>
+        </div>
+        <div class="usage-panel">
+          <div class="usage-title">受管目录（<span class="mono">${esc(st.managedDir || '')}</span>）</div>
+          ${st.serverMode
+            ? (st.quotaBytes > 0
+              ? bar(quotaPct, quotaPct > 90 ? 'danger' : '')
+              : bar(0))
+            : ''}
+          <div class="usage-nums">
+            已用 <b>${gb(st.managedUsed)}</b>（${st.managedFiles} 个文件）
+            ${st.quotaBytes > 0
+              ? `／ 上限 <b>${st.quotaGB} GB</b> <span class="muted">（${quotaPct.toFixed(1)}%）</span>`
+              : '／ <span class="muted">未设置容量上限</span>'}
+          </div>
+        </div>
+      </div>
+      <div class="hint muted small" style="margin-top:10px">
+        ${st.serverMode
+          ? `服务器模式<strong style="color:var(--ok)">已启用</strong>：下载与文件操作都收拢在受管目录内，填写相对路径即可。
+             ${st.quotaBytes > 0 && st.managedUsed >= st.quotaBytes ? '<strong style="color:var(--fail)">已超出容量上限，新增文件会被拒绝。</strong>' : ''}`
+          : `服务器模式<strong>未启用</strong>：文件页根目录＝下载目录 <span class="mono">${esc(st.downloadDir || '')}</span>。`}
+      </div>`;
+  }
+
+  view.querySelector('#st-save').onclick = async () => {
+    const btn = view.querySelector('#st-save');
+    const r = await saveConfig({
+      serverMode: view.querySelector('#st-servermode').checked,
+      managedDir: view.querySelector('#st-manageddir').value.trim(),
+      managedQuotaGB: Number(view.querySelector('#st-quota').value) || 0,
+    }, btn);
+    if (r) await drawUsage();
+  };
+
+  await drawUsage();
 
   // ---- tdl path / auto-download -------------------------------------------
   const tdlCur = view.querySelector('#s-tdlcur');

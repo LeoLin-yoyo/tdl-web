@@ -545,3 +545,24 @@ details.adv .adv-body { padding-top: 10px; }
 /* 原生全屏时同样藏掉浮动/最大化专用件，避免与全屏语义打架 */
 .player-shell:fullscreen .pl-dragbar,
 .player-shell:fullscreen .pl-resize { display: none; }
+
+/* ---- 设置页：容量使用情况 ------------------------------------------------ */
+.usage-panel {
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.usage-title { font-size: 12.5px; color: var(--text); margin-bottom: 8px; }
+.usage-bar {
+  height: 8px; border-radius: 4px; overflow: hidden;
+  background: rgba(255,255,255,.09); margin-bottom: 8px;
+}
+.usage-fill {
+  height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), #4fd1c5);
+  transition: width .3s ease;
+}
+/* 接近或超过上限时变红，让用户一眼看出该清理了 */
+.usage-fill.danger { background: linear-gradient(90deg, #e0563f, #ff8a65); }
+.usage-nums { font-size: 12.5px; line-height: 1.9; }
