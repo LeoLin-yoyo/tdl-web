@@ -21,20 +21,27 @@ LOCK="$LOGS/.libreoffice-installing"
 
 log() { echo "[lo-setup $(date '+%F %T')] $*"; }
 
-# 已经装好过（且验证可用）→ 直接返回
-if [ -f "$MARK" ] && command -v soffice >/dev/null 2>&1; then
-  # 再确认一次不是半残（标记存在但二进制坏了的情况）
-  if timeout 60 soffice --version >/dev/null 2>&1; then
-    exit 0
-  fi
-  rm -f "$MARK"
-fi
+# 已经装好过（且验证可用）→ 直接返回。
+# 注意：这段快路径只对 install/detach 生效 —— status 必须走到下面的 case
+# 去打印人可读的状态，否则它会被这里的 exit 0 直接吞掉、什么都不输出。
+case "$1" in
+  status) ;;   # 交给文件末尾的 status 分支
+  *)
+    if [ -f "$MARK" ] && command -v soffice >/dev/null 2>&1; then
+      # 再确认一次不是半残（标记存在但二进制坏了的情况）
+      if timeout 60 soffice --version >/dev/null 2>&1; then
+        exit 0
+      fi
+      rm -f "$MARK"
+    fi
 
-# 正在装 → 不重复启动第二个 apt
-if [ -f "$LOCK" ]; then
-  log "已有安装在进行中，跳过"
-  exit 0
-fi
+    # 正在装 → 不重复启动第二个 apt
+    if [ -f "$LOCK" ]; then
+      log "已有安装在进行中，跳过"
+      exit 0
+    fi
+    ;;
+esac
 
 do_install() {
   mkdir -p "$LOGS"
