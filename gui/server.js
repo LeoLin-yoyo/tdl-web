@@ -494,6 +494,61 @@ async function api(req, res, pathname, searchParams) {
   if (method === 'GET' && p === '/api/files') {
     return sendJson(res, 200, files.list(searchParams.get('path') || '.'));
   }
+
+  // ---- 文件管理 API（增删改查 / 文本编辑 / 上传）---------------------------
+  //
+  // 全部为写操作，走 POST（GET 不产生副作用，防 CSRF 的既有设计）；
+  // CSRF 令牌校验由上层统一门禁处理，这里只管业务。
+  if (method === 'GET' && p === '/api/files/storage') {
+    return sendJson(res, 200, config.storageOverview());
+  }
+  if (method === 'GET' && p === '/api/files/text') {
+    return sendJson(res, 200, files.readText(String(searchParams.get('path') || '')));
+  }
+  if (method === 'POST' && p === '/api/files/mkdir') {
+    const b = await readBody(req);
+    const parent = String(b.path || '.');
+    const name = String(b.name || '');
+    const sub = files.joinSafe(parent, name);
+    if (!sub) return sendJson(res, 400, { error: '目录名非法（不能含 / \\ 或特殊字符）' });
+    return sendJson(res, 200, files.mkdir(sub));
+  }
+  if (method === 'POST' && p === '/api/files/rename') {
+    const b = await readBody(req);
+    return sendJson(res, 200, files.rename(String(b.path || ''), String(b.name || '')));
+  }
+  if (method === 'POST' && p === '/api/files/move') {
+    const b = await readBody(req);
+    return sendJson(res, 200, files.transfer(String(b.path || ''), String(b.dir || '.'), true));
+  }
+  if (method === 'POST' && p === '/api/files/copy') {
+    const b = await readBody(req);
+    return sendJson(res, 200, files.transfer(String(b.path || ''), String(b.dir || '.'), false));
+  }
+  if (method === 'POST' && p === '/api/files/delete') {
+    const b = await readBody(req);
+    // 默认进回收站（可恢复）；只有显式 hard=true 才真删
+    return sendJson(res, 200, files.remove(String(b.path || ''), b.hard === true));
+  }
+  if (method === 'POST' && p === '/api/files/text') {
+    const b = await readBody(req);
+    return sendJson(res, 200, files.writeText(String(b.path || ''), b.content));
+  }
+  if (method === 'POST' && p === '/api/files/upload') {
+    const b = await readBody(req);
+    const dir = String(b.dir || '.');
+    const name = files.safeName(String(b.name || ''));
+    if (!name) return sendJson(res, 400, { error: '文件名非法' });
+    const sub = files.joinSafe(dir, name);
+    if (!sub) return sendJson(res, 400, { error: '路径非法' });
+    let buf;
+    try {
+      buf = Buffer.from(String(b.data || ''), 'base64');
+    } catch { return sendJson(res, 400, { error: '内容解码失败' }); }
+    if (!buf.length) return sendJson(res, 400, { error: '空文件' });
+    return sendJson(res, 200, files.saveUpload(sub, buf));
+  }
+
   if (method === 'GET' && p === '/api/files/raw') {
     const sub = String(searchParams.get('path') || '');
     if (sub.includes('..')) return sendJson(res, 400, { error: 'illegal path' });

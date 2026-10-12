@@ -104,7 +104,65 @@ const DEFAULTS = {
   streamWindowMB: 256,   // keep this much fetched ahead of the playhead
   streamCacheMB: 512,    // in-memory block cache cap (seek-back friendly)
   streamIdleMin: 10,     // close the playback session after this many idle minutes
+
+  // ---- 服务器模式 / 受管目录 ------------------------------------------------
+  //
+  // 「服务器模式」解决的问题：下载落在远端服务器上，用户碰不到那些文件。
+  // 打开后，下载与文件管理都收拢到同一个受管目录里：
+  //   - 下载表单里填的目录一律当成**相对受管目录**的路径（相对路径）
+  //   - 「文件」页的一切增删改查都限定在这个目录内
+  //   - 可对整个目录设容量上限，超限不再写入
+  serverMode: false,
+  // 受管目录的绝对路径。留空 = 自动创建 gui/data/managed。
+  managedDir: '',
+  // 受管目录的容量上限（GB）。0 = 不限制。
+  managedQuotaGB: 0,
 };
+
+// 受管目录的默认位置：gui/data/managed。
+// 放在 data/ 下是因为 data/ 已在 .gitignore 里，不会把用户的文件带进仓库。
+const MANAGED_DEFAULT = path.join(DATA_DIR, 'managed');
+
+// 解析受管目录的绝对路径。空值 → 默认目录；填了就用填的（自动 resolve + 建目录）。
+// 创建失败时退回默认目录，避免整个服务起不来。
+function managedRoot() {
+  const cfg = load();
+  const raw = String(cfg.managedDir || '').trim();
+  const target = raw ? path.resolve(raw) : MANAGED_DEFAULT;
+  try {
+    fs.mkdirSync(target, { recursive: true });
+    return target;
+  } catch {
+    try { fs.mkdirSync(MANAGED_DEFAULT, { recursive: true }); } catch { /* 交给调用方报错 */ }
+    return MANAGED_DEFAULT;
+  }
+}
+
+// 当前生效的「文件操作根目录」：
+//   服务器模式 → 受管目录（文件操作与相对下载路径都基于它）
+//   普通模式   → 用户配置的下载目录（保持原有行为）
+function activeRoot() {
+  const cfg = load();
+  return cfg.serverMode ? managedRoot() : path.resolve(cfg.dir || DEFAULTS.dir);
+}
+
+// 把用户在下载表单里填的路径，按当前模式解成绝对路径。
+//   服务器模式：填的路径一律当成**相对受管目录**的路径 —— 即使以 / 开头也
+//              剥掉开头的分隔符再拼接。否则用户一句 /etc 就把文件写到系统
+//              目录去了，受管目录的意义（和容量限制）会整个失效。
+//   普通模式：维持原有行为。
+function resolveDownloadDir(input) {
+  const cfg = load();
+  const base = activeRoot();
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) return base;
+  if (!cfg.serverMode) return path.resolve(base, raw);
+  const rel = raw.replace(/^([A-Za-z]:)?[\\/]+/, '');
+  const abs = path.resolve(base, rel);
+  // 越界（例如 ../../）就退回受管目录根，绝不写到目录外
+  if (abs !== base && !abs.startsWith(base + path.sep)) return base;
+  return abs;
+}
 
 let cache = null;
 
@@ -165,6 +223,17 @@ function save(patch) {
   }
   next.dir = path.resolve(String(next.dir || DEFAULTS.dir));
   next.ns = safeNs(next.ns); // the namespace becomes a filename — never a path
+
+  // ---- 服务器模式 / 受管目录 ----
+  next.serverMode = next.serverMode === true || next.serverMode === 'true';
+  // 受管目录允许留空（= 用默认目录），填了就必须是绝对路径。
+  // 不在这里创建：目录创建带副作用，交给 managedRoot() 在真正用到时做。
+  next.managedDir = String(next.managedDir == null ? '' : next.managedDir).trim();
+  if (next.managedDir) next.managedDir = path.resolve(next.managedDir);
+  // 容量上限：整数 GB，0 表示不限制，上限 1PB 防手滑多打几个零
+  const quota = Math.round(Number(next.managedQuotaGB));
+  next.managedQuotaGB = Number.isFinite(quota) && quota >= 0 ? Math.min(quota, 1024 * 1024) : 0;
+
   cache = next;
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -217,7 +286,130 @@ function saveHistory(list) {
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(list.slice(-200), null, 2));
 }
 
+// ---- 容量统计 --------------------------------------------------------------
+//
+// 「受管目录已用多少」用递归遍历来算。文件多时这会慢，所以结果缓存一小段时间
+// （默认 5 秒），避免设置页每次刷新都全盘扫一遍。写入操作会让缓存立即失效。
+
+const USAGE_TTL_MS = 5000;
+let usageCache = { dir: '', at: 0, bytes: 0, files: 0 };
+let usageDirty = true;
+
+// 目录占用统计。跳过符号链接，避免链接成环时无限递归。
+function dirUsage(dir, acc = { bytes: 0, files: 0 }, depth = 0) {
+  if (depth > 64) return acc; // 防御异常深的目录树
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
+  for (const ent of entries) {
+    const full = path.join(dir, ent.name);
+    try {
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isDirectory()) {
+        dirUsage(full, acc, depth + 1);
+      } else if (ent.isFile()) {
+        acc.bytes += fs.statSync(full).size;
+        acc.files += 1;
+      }
+    } catch { /* 读不到的条目跳过，不因单个文件失败中断统计 */ }
+  }
+  return acc;
+}
+
+// 让占用缓存失效（文件写入/删除后调用）
+function invalidateUsage() { usageDirty = true; }
+
+function managedUsage(force = false) {
+  const dir = managedRoot();
+  const now = Date.now();
+  if (!force && !usageDirty && usageCache.dir === dir && now - usageCache.at < USAGE_TTL_MS) {
+    return usageCache;
+  }
+  const acc = dirUsage(dir, { bytes: 0, files: 0 });
+  usageCache = { dir, at: now, bytes: acc.bytes, files: acc.files };
+  usageDirty = false;
+  return usageCache;
+}
+
+// 机器层面的容量（整个文件系统）。statfs 在 Node 18+ 可用。
+function diskSpace(targetPath) {
+  const p = targetPath || activeRoot();
+  try {
+    const st = fs.statfsSync(p);
+    const total = st.blocks * st.bsize;
+    const free = st.bavail * st.bsize;
+    const used = total - st.bfree * st.bsize;
+    return { ok: true, path: p, total, free, used };
+  } catch (e) {
+    return { ok: false, path: p, error: e.message, total: 0, free: 0, used: 0 };
+  }
+}
+
+// 是否还能写入 needBytes 字节。
+// 同时看两道闸：(1) 受管目录自己的配额；(2) 机器实际剩余空间。
+// 两者取更严的那个 —— 只看配额可能写到磁盘满，只看磁盘则配额形同虚设。
+function checkWritable(needBytes = 0) {
+  const cfg = load();
+  const quotaBytes = Math.max(0, Number(cfg.managedQuotaGB) || 0) * 1024 * 1024 * 1024;
+  const need = Math.max(0, Number(needBytes) || 0);
+
+  if (cfg.serverMode && quotaBytes > 0) {
+    const used = managedUsage().bytes;
+    if (used + need > quotaBytes) {
+      return {
+        ok: false,
+        reason: 'quota',
+        message: `受管目录容量不足：已用 ${fmtGB(used)}，限额 ${fmtGB(quotaBytes)}，本次还需 ${fmtGB(need)}`,
+        used, quotaBytes, need,
+      };
+    }
+  }
+  const disk = diskSpace();
+  if (disk.ok && disk.free < need) {
+    return {
+      ok: false,
+      reason: 'disk',
+      message: `机器可用空间不足：剩余 ${fmtGB(disk.free)}，本次还需 ${fmtGB(need)}`,
+      used: 0, quotaBytes, need, diskFree: disk.free,
+    };
+  }
+  return { ok: true, quotaBytes, need };
+}
+
+function fmtGB(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 ** 4) return `${(n / 1024 ** 4).toFixed(2)} TB`;
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+// 设置页用的一份容量总览
+function storageOverview() {
+  const cfg = load();
+  const rootDir = activeRoot();
+  const managed = managedRoot();
+  const usage = managedUsage(true);
+  const disk = diskSpace(rootDir);
+  const quotaBytes = Math.max(0, Number(cfg.managedQuotaGB) || 0) * 1024 * 1024 * 1024;
+  return {
+    serverMode: !!cfg.serverMode,
+    managedDir: managed,
+    activeRoot: rootDir,
+    downloadDir: cfg.dir,
+    managedUsed: usage.bytes,
+    managedFiles: usage.files,
+    quotaBytes,
+    quotaGB: Number(cfg.managedQuotaGB) || 0,
+    quotaUsedPct: quotaBytes > 0 ? Math.min(100, (usage.bytes / quotaBytes) * 100) : 0,
+    disk,
+  };
+}
+
 module.exports = {
   GUI_ROOT, DATA_DIR, CONFIG_FILE, HISTORY_FILE, TDL_AUTO_DIR, TDL_EXE,
   locateTdl, load, save, globalArgs, loadHistory, saveHistory, downloadDefaults, safeNs,
+  MANAGED_DEFAULT, managedRoot, activeRoot, resolveDownloadDir,
+  managedUsage, diskSpace, checkWritable, fmtGB, invalidateUsage, storageOverview, dirUsage,
 };
+

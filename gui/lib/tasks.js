@@ -82,7 +82,9 @@ function buildDlArgs(t, cfg) {
   for (const u of strList(c.urls)) args.push('-u', u);
   for (const f of strList(c.files)) args.push('-f', f);
   const dir = str(pick(c.dir, d.dir)) || d.dir;
-  args.push('--dir', path.resolve(dir));
+  // 服务器模式下，表单里填的一律当成「相对受管目录」的路径；
+  // 普通模式维持原行为。见 config.resolveDownloadDir 的说明。
+  args.push('--dir', config.resolveDownloadDir(dir));
   const inc = strList(c.include).length ? strList(c.include) : d.include;
   const exc = strList(c.exclude).length ? strList(c.exclude) : d.exclude;
   if (inc.length) args.push('--include', extArgs(inc));
@@ -146,7 +148,7 @@ function buildExportArgs(t, cfg) {
   const input = (Array.isArray(c.input) ? c.input : strList(c.input)).map((n) => Math.trunc(Number(n))).filter((n) => Number.isFinite(n));
   for (const n of input) args.push('--input', String(n));
   args.push('--filter', str(c.filter, 'true'));
-  const out = str(c.output) || path.join(cfg.dir, `tdl-export-${Date.now()}.json`);
+  const out = str(c.output) || path.join(config.activeRoot(), `tdl-export-${Date.now()}.json`);
   args.push('--output', path.resolve(out));
   if (bool(c.withContent)) args.push('--with-content');
   if (bool(c.raw)) args.push('--raw');
@@ -628,7 +630,9 @@ async function runDownloadTask(t, cfg) {
 
 async function runTask(t) {
   const cfg = config.load();
-  t.dir = t.type === 'dl' ? path.resolve(str(t.config.dir) || cfg.dir) : '';
+  // 下载目录同样要走 resolveDownloadDir：服务器模式下必须落在受管目录内，
+  // 否则任务卡片上显示的路径与实际写入的位置会对不上。
+  t.dir = t.type === 'dl' ? config.resolveDownloadDir(str(t.config.dir) || cfg.dir) : '';
 
   // downloads go through the resumable serve/HTTP path
   if (t.type === 'dl') return runDownloadTask(t, cfg);
