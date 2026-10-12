@@ -3,7 +3,7 @@
 // 根目录由后端决定：服务器模式 → 受管目录；普通模式 → 下载目录。
 // 前端不假设根在哪，一律用后端返回的 root 来显示。
 
-import { api, esc, fmtBytes, fmtTime, registerRoute, toast, modal, store } from '../app.js';
+import { api, esc, fmtBytes, fmtTime, registerRoute, toast, modal } from '../app.js';
 import { openMiniPlayer } from '../components.js';
 
 let cwd = '.';
