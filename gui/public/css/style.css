@@ -600,36 +600,42 @@ details.adv .adv-body { padding-top: 10px; }
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-/* ---- 通用小播放器（文件页预览）------------------------------------------ */
+/* ---- 小播放器（文件页视频预览）：本身即一扇可拖动、可缩放的浮动窗 ------ */
+/* 不再有「内嵌」形态：打开就是右下角的浮动窗，标题栏显示文件名。 */
 .mini-player {
   position: relative; background: #000; border-radius: 8px; overflow: hidden;
   display: flex; flex-direction: column;
+  width: 100%; height: 100%;
 }
-.mini-player video { width: 100%; max-height: 62vh; display: block; background: #000; position: relative; z-index: 1; }
+.mini-player video { width: 100%; display: block; background: #000; position: relative; z-index: 1; }
 .mp-bar {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   background: rgba(0,0,0,.72); position: relative; z-index: 4;
+  /* 右下角留出缩放手柄的扇形空间，别让把手压住最后一个按钮 */
+  padding-right: 34px;
 }
 .mp-time { font-size: 11.5px; color: #cfd9e6; min-width: 84px; }
 .mp-seek { flex: 1; accent-color: var(--accent); cursor: pointer; }
 .mp-vol { width: 70px; accent-color: var(--accent); cursor: pointer; }
-/* 拖动条 / 缩放把手，只在浮动窗模式出现 */
+/* 标题栏：常驻，显示文件名 + 下载 + 关闭 */
 .mp-dragbar {
-  display: none; position: absolute; left: 0; right: 0; top: 0; height: 26px; z-index: 6;
+  display: flex; position: absolute; left: 0; right: 0; top: 0; height: 28px; z-index: 6;
   align-items: center; gap: 8px; padding: 0 8px;
-  background: linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,0));
+  background: linear-gradient(to bottom, rgba(0,0,0,.85), rgba(0,0,0,.35) 70%, rgba(0,0,0,0));
   color: #e8eefc; font-size: 12px; cursor: move;
 }
 .mp-dots { opacity: .6; letter-spacing: -2px; }
 .mp-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mp-hint { margin-left: auto; font-size: 11px; opacity: .6; white-space: nowrap; }
-.mp-x { background: none; border: none; color: #e8eefc; cursor: pointer; font-size: 13px; }
+.mp-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.mp-dl { color: #e8eefc; text-decoration: none; font-size: 13px; opacity: .85; padding: 0 2px; }
+.mp-dl:hover { opacity: 1; color: #8ab4ff; }
+.mp-x { background: none; border: none; color: #e8eefc; cursor: pointer; font-size: 13px; padding: 0 2px; }
 .mp-x:hover { color: #ff7a7a; }
 .mp-resize {
-  display: none; position: absolute; right: 0; bottom: 0; width: 34px; height: 34px; z-index: 6;
+  display: block; position: absolute; right: 0; bottom: 0; width: 34px; height: 34px; z-index: 6;
   cursor: nwse-resize; touch-action: none;
   /* 只让斜纹所在的右下角扇形区域接收指针事件，其余部分放行：
-     34×34 的把手正好压在控制条最后一个按钮（最大化）上，整块吃掉事件
+     34×34 的把手正好压在控制条最后一个按钮上，整块吃掉事件
      会让那个按钮点不动。用 clip-path 裁成三角形即可两全。 */
   clip-path: polygon(100% 0, 100% 100%, 0 100%);
   pointer-events: auto;
@@ -642,16 +648,37 @@ details.adv .adv-body { padding-top: 10px; }
     linear-gradient(135deg, transparent 0 86%, rgba(255,255,255,.75) 86% 94%, transparent 94%);
   filter: drop-shadow(0 1px 2px rgba(0,0,0,.8)); pointer-events: none;
 }
+/* 浮动窗：脱离文档流、固定于视口。这是播放器的常态。 */
 .mini-player.mp-floating {
-  position: fixed; z-index: 900; box-shadow: 0 18px 50px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.14);
+  position: fixed; z-index: 1200;
+  box-shadow: 0 18px 50px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.14);
 }
-.mini-player.mp-floating .mp-dragbar { display: flex; }
-.mini-player.mp-floating .mp-resize { display: block; }
-.mini-player.mp-floating video { max-height: none; flex: 1; min-height: 0; object-fit: contain; }
+.mini-player.mp-floating video { flex: 1; min-height: 0; object-fit: contain; }
 .mini-player.mp-maximized {
-  position: fixed; inset: 0; z-index: 950; border-radius: 0;
+  position: fixed; inset: 0; z-index: 1210; border-radius: 0;
 }
-.mini-player.mp-maximized video { max-height: none; flex: 1; min-height: 0; object-fit: contain; }
-.mini-player.mp-maximized .mp-dragbar,
+.mini-player.mp-maximized video { flex: 1; min-height: 0; object-fit: contain; }
 .mini-player.mp-maximized .mp-resize { display: none; }
+/* 真全屏：交给浏览器渲染，填满整块显示器 */
+.mini-player.mp-fullscreen { position: fixed; inset: 0; border-radius: 0; background: #000; }
+.mini-player.mp-fullscreen video { flex: 1; min-height: 0; object-fit: contain; }
+.mini-player.mp-fullscreen .mp-resize { display: none; }
+/* 原生全屏时浏览器自己接管尺寸，清掉内联几何，避免和 ::backdrop 打架 */
+.mini-player:fullscreen { border-radius: 0; }
+.mini-player:fullscreen .mp-resize { display: none; }
 .mini-player.mp-dragging, .mini-player.mp-resizing { user-select: none; }
+/* 浮动窗整体即是拖动区：拖画面任何位置都能移动窗口，不必非抓顶部细条 */
+.mini-player.mp-floating video { cursor: move; }
+.mini-player.mp-floating.mp-dragging video { cursor: move; }
+
+/* ---- 设置页：容量上限的「数值 + 单位」 ------------------------------------ */
+/* 数字框占据剩余宽度，单位下拉固定宽度，两者同高对齐 */
+.quota-row { display: flex; gap: 8px; align-items: stretch; }
+.quota-row input[type="number"] { flex: 1; min-width: 0; }
+.quota-row select {
+  width: 76px; flex: 0 0 auto;
+  background: rgba(255,255,255,.05); color: var(--text);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 6px;
+  padding: 0 8px; font-size: 13px; cursor: pointer;
+}
+.quota-row select:focus { outline: none; border-color: var(--accent); }

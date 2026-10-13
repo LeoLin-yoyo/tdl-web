@@ -230,9 +230,16 @@ function save(patch) {
   // 不在这里创建：目录创建带副作用，交给 managedRoot() 在真正用到时做。
   next.managedDir = String(next.managedDir == null ? '' : next.managedDir).trim();
   if (next.managedDir) next.managedDir = path.resolve(next.managedDir);
-  // 容量上限：整数 GB，0 表示不限制，上限 1PB 防手滑多打几个零
-  const quota = Math.round(Number(next.managedQuotaGB));
-  next.managedQuotaGB = Number.isFinite(quota) && quota >= 0 ? Math.min(quota, 1024 * 1024) : 0;
+  // 容量上限：内部一律以 GB 存储，0 表示不限制。
+  // 不取整：设置页支持 MB 单位，512 MB 会换算成 0.5 GB 提交上来，
+  // 取整会把它抹成 0（= 不限制），用户的限额会静默失效。
+  // 保留 6 位小数（≈1 KB 精度）而不是 2 位 —— 2 位只到 10 MB 量级，
+  // 那样「设 1 MB 上限」会被抹成 0，等于悄悄变成「不限制」。
+  // 上限 1 PB 防手滑多打几个零。
+  const quota = Number(next.managedQuotaGB);
+  next.managedQuotaGB = Number.isFinite(quota) && quota > 0
+    ? Math.min(Math.round(quota * 1e6) / 1e6, 1024 * 1024)
+    : 0;
 
   cache = next;
 

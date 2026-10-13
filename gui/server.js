@@ -66,13 +66,20 @@ function sendJson(res, code, obj) {
   res.end(body);
 }
 
-function readBody(req) {
+// 请求体上限。JSON 请求都很小，但「上传」要收 base64 后的整个文件内容
+// （base64 比原始字节大 4/3），所以上传单独放宽。
+// 前端允许上传到 64MB，对应 base64 约 85.4MB，取 96MB 留余量；
+// 其余接口仍旧 1MB —— 不设限会让一个畸形请求把内存吃光。
+const BODY_LIMIT_DEFAULT = 1024 * 1024;
+const BODY_LIMIT_UPLOAD = 96 * 1024 * 1024;
+
+function readBody(req, limit = BODY_LIMIT_DEFAULT) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size > 1024 * 1024) { reject(new Error('body too large')); req.destroy(); return; }
+      if (size > limit) { reject(new Error('body too large')); req.destroy(); return; }
       chunks.push(c);
     });
     req.on('end', () => {
@@ -567,7 +574,16 @@ async function api(req, res, pathname, searchParams) {
     return sendJson(res, 200, files.writeText(String(b.path || ''), b.content));
   }
   if (method === 'POST' && p === '/api/files/upload') {
-    const b = await readBody(req);
+    let b;
+    try {
+      b = await readBody(req, BODY_LIMIT_UPLOAD);
+    } catch (e) {
+      // 不要直接断开连接 —— 前端只会看到「网络错误」，不知道是文件太大。
+      return sendJson(res, 413, {
+        error: '文件过大',
+        message: `上传内容超过 ${Math.round(BODY_LIMIT_UPLOAD / 1024 / 1024)}MB 上限，请改用其他方式放入目录`,
+      });
+    }
     const dir = String(b.dir || '.');
     const name = files.safeName(String(b.name || ''));
     if (!name) return sendJson(res, 400, { error: '文件名非法' });

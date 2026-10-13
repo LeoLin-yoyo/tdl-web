@@ -4,6 +4,17 @@ import { api, esc, store, registerRoute, toast, fmtTime, setCsrfToken } from '..
 
 async function render(view) {
   const cfg = store.config || {};
+
+  // 把存量的「GB 数」还原成最顺眼的单位：2048 → 2 TB、512 → 512 GB、
+  // 0.5 → 512 MB。后端只存 GB，这里纯粹是展示层换算，不动数据格式。
+  const quotaInit = (() => {
+    const gb = Number(cfg.managedQuotaGB) || 0;
+    if (gb <= 0) return { value: 0, unit: 'GB' };
+    if (gb >= 1024 && gb % 1024 === 0) return { value: gb / 1024, unit: 'TB' };
+    if (gb < 1) return { value: Math.round(gb * 1024 * 100) / 100, unit: 'MB' };
+    return { value: gb, unit: 'GB' };
+  })();
+
   view.innerHTML = `
     <div class="card" id="storage-card">
       <h2>文件服务（服务器模式）</h2>
@@ -21,8 +32,15 @@ async function render(view) {
         <div class="field"><label>受管目录（留空＝自动创建 gui/data/managed）</label>
           <input type="text" id="st-manageddir" value="${esc(cfg.managedDir || '')}" placeholder="留空则自动创建，例如 /data/share">
           <span class="hint">填任意可写目录路径即可接管；不填则程序自行创建默认目录</span></div>
-        <div class="field"><label>目录容量上限（GB，0＝不限制）</label>
-          <input type="number" id="st-quota" value="${cfg.managedQuotaGB ?? 0}" min="0" step="1">
+        <div class="field"><label>目录容量上限（0＝不限制）</label>
+          <div class="quota-row">
+            <input type="number" id="st-quota" value="${quotaInit.value}" min="0" step="any">
+            <select id="st-quota-unit">
+              <option value="0.0009765625" ${quotaInit.unit === 'MB' ? 'selected' : ''}>MB</option>
+              <option value="1" ${quotaInit.unit === 'GB' ? 'selected' : ''}>GB</option>
+              <option value="1024" ${quotaInit.unit === 'TB' ? 'selected' : ''}>TB</option>
+            </select>
+          </div>
           <span class="hint">超过上限后不再写入新文件（受管目录自身容量，与机器剩余空间取更严者）</span></div>
       </div>
       <button class="btn primary" id="st-save">保存文件服务设置</button>
@@ -237,10 +255,20 @@ async function render(view) {
 
   view.querySelector('#st-save').onclick = async () => {
     const btn = view.querySelector('#st-save');
+    // 把「数值 + 单位」换算成后端统一的 GB 再提交。
+    // 单位下拉的 value 就是「1 个单位等于多少 GB」：MB=1/1024、GB=1、TB=1024。
+    const unitGB = Number(view.querySelector('#st-quota-unit').value) || 1;
+    const amount = Number(view.querySelector('#st-quota').value) || 0;
+    // 换算精度与后端一致（6 位小数 ≈ 1 KB），小于 1KB 的输入才视为无效。
+    let gb = 0;
+    if (amount > 0) {
+      gb = Math.round(amount * unitGB * 1e6) / 1e6;
+      if (gb <= 0) { toast('容量上限太小（不足 1KB），请调大或用更大的单位', 'error'); return; }
+    }
     const r = await saveConfig({
       serverMode: view.querySelector('#st-servermode').checked,
       managedDir: view.querySelector('#st-manageddir').value.trim(),
-      managedQuotaGB: Number(view.querySelector('#st-quota').value) || 0,
+      managedQuotaGB: gb,
     }, btn);
     if (r) await drawUsage();
   };
