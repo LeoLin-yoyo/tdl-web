@@ -246,10 +246,43 @@ export async function navigate() {
 
 window.addEventListener('hashchange', navigate);
 
+// ---- 移动端导航抽屉 ----------------------------------------------------------
+// 手机上侧边栏是抽屉：点汉堡滑出，选完页面自动收起。
+// 只在窄屏生效；桌面端侧边栏常驻，这些操作等于空转。
+function setNavOpen(open) {
+  document.body.classList.toggle('nav-open', open);
+  const btn = document.getElementById('nav-toggle');
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function initNavDrawer() {
+  const btn = document.getElementById('nav-toggle');
+  const scrim = document.getElementById('nav-scrim');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    setNavOpen(!document.body.classList.contains('nav-open'));
+  });
+  // 点遮罩关闭
+  scrim?.addEventListener('click', () => setNavOpen(false));
+  // 选中任一导航项后收起，免得挡住刚打开的页面
+  document.querySelectorAll('#nav a').forEach((a) => {
+    a.addEventListener('click', () => setNavOpen(false));
+  });
+  // Esc 关闭
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') setNavOpen(false);
+  });
+  // 转屏或拉宽到桌面时，兜底清掉抽屉状态，避免残留遮罩挡住页面
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 640) setNavOpen(false);
+  });
+}
+
 // ---- boot --------------------------------------------------------------------
 
 export async function boot() {
   if (typeof window !== 'undefined') window.__store = store; // debug handle
+  initNavDrawer();
   // 先取 CSRF 令牌：服务端对写操作校验双提交令牌，
   // 不先拿到它，扫码登录等所有写操作都会 403。
   await initCsrf();

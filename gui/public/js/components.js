@@ -223,6 +223,7 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
         <input type="range" class="mp-seek" id="mp-seek" min="0" max="1000" value="0">
         <button class="btn xs" id="mp-mute">🔊</button>
         <input type="range" class="mp-vol" id="mp-vol" min="0" max="1" step="0.05" value="1">
+        <button class="btn xs" id="mp-fit" title="铺满 / 完整显示">⤡</button>
         <button class="btn xs" id="mp-max" title="网页内最大化">⛶</button>
         <button class="btn xs" id="mp-fs" title="全屏（显示器全屏）">⤢</button>
       </div>
@@ -238,6 +239,7 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
   const volEl = mount.querySelector('#mp-vol');
   const maxBtn = mount.querySelector('#mp-max');
   const fsBtn = mount.querySelector('#mp-fs');
+  const fitBtn = mount.querySelector('#mp-fit');
   const dragbar = mount.querySelector('#mp-dragbar');
   const grip = mount.querySelector('#mp-resize');
 
@@ -254,17 +256,98 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
   const setIcon = () => { toggle.textContent = video.paused ? '▶' : '❚❚'; };
 
   toggle.onclick = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
-  // 点画面切换播放/暂停 —— 但拖动窗口时不能误触发（拖动结束会把 click 一起送上来）
+  // 点画面：
+  //   · 手机/最大化/全屏 → 切换控制条显隐（主流 App 的做法；播放交给中间按钮，
+  //     避免想看一眼控制条却把视频暂停了）
+  //   · 桌面普通浮动窗 → 沿用原行为「切播放/暂停」，不改桌面习惯
+  // 拖动窗口结束时不能误触发（拖动会把 click 一起送上来），用 suppressClick 挡一次。
+  //
+  // ⚠️ 铁律：收起控制条绝不能变成「死路」。
+  //   用户反馈「操作栏隐藏之后就不能再呼出了，我不能退出播放了」——
+  //   因为控制条 pointer-events:none，✕ 也一起没了，唯一的出路就是点画面唤出。
+  //   所以：**只要当前是隐藏态，任何一次点画面都必须唤出，永远不做「再收起」**。
+  //   只有在「已经显示」的状态下点画面，才允许收起。
+  //   另加 hideAt 时间戳：自动隐藏后 300ms 内的点击一定算「唤出」，
+  //   避免同一次触摸自带的 move/click 序列被误判成「再收起」。
   let suppressClick = false;
   video.onclick = () => {
     if (suppressClick) { suppressClick = false; return; }
-    toggle.onclick();
+    if (isImmersive()) {
+      hoveringUI = false;                                       // 点画面 = 离开控制条
+      // 手机上「点画面」只有一个职责：切换控制条显隐（和 YouTube/抖音一致）。
+      // 播放/暂停只由中间的按钮负责，免得想看一眼进度却把视频暂停了。
+      // 铁律：隐藏态下点一下**必须**唤出 —— 否则 ✕ 被 pointer-events:none 挡住，
+      //       又没有键盘，用户就彻底退不出去了（这是用户报过的真实故障）。
+      if (shell.classList.contains('mp-ui-hidden')) {
+        kickIdle();                                             // 隐藏 → 唤出
+      } else if (Date.now() - hideState.at < 300) {
+        kickIdle();                                             // 刚收起 → 也算唤出，别来回抖
+      } else {
+        forceHide();                                            // 显示 → 收起（用户主动，任何时候都照做）
+      }
+      return;
+    }
+    toggle.onclick();                                           // 桌面浮动窗：沿用原来「点画面切播放」
   };
   video.onplay = setIcon;
   video.onpause = setIcon;
   video.ontimeupdate = sync;
-  video.onloadedmetadata = sync;
   video.ondurationchange = sync;
+
+  // ---- 画幅自适应：视频是横是竖，决定手机全屏怎么放 --------------------------
+  // 用户原话：「你不能判断视频是 16:9 还是 9:16 吗？做出对应的全屏化处理，
+  //            16:9 就自动横向全屏呀」—— 完全正确。以前一律 object-fit:contain，
+  // 于是横屏视频塞进竖屏手机只剩一小条（实测 960×720 → 390×292，仅占屏高 35%）。
+  //
+  // 做法：读 video 自身的 videoWidth/videoHeight 判断画幅，再结合当前屏幕朝向：
+  //   · 竖屏视频（9:16）配竖屏手机  → contain 天然就满屏，不用管
+  //   · 横屏视频（16:9）配竖屏手机  → 改用 cover 铺满（左右裁边），
+  //                                  这正是 YouTube/抖音「填充屏幕」的效果
+  //   · 横屏视频配横屏手机          → contain 也满，不用管
+  // 同时给用户一个 ⤡ 按钮手动在「铺满 / 完整显示」之间切换 —— 自动判断可能不合心意，
+  // 比如你想看全整幅画面（宁可留黑边）时，一键切回。
+  let videoAR = 0;            // 视频宽高比（w/h），0 = 未知
+  let fillMode = 'auto';      // 'auto' | 'fill'(铺满) | 'fit'(完整显示)
+
+  const isPortraitScreen = () => window.innerHeight > window.innerWidth;
+  const videoIsLandscape = () => videoAR > 1.05;   // 留一点容差，接近方形的当竖屏处理
+
+  // 该不该铺满：横屏视频 + 竖屏屏幕 → 铺满最合理
+  const wantsFill = () => {
+    if (!videoAR) return false;
+    if (fillMode === 'fill') return true;
+    if (fillMode === 'fit') return false;
+    return videoIsLandscape() && isPortraitScreen();
+  };
+
+  const applyFit = () => {
+    const fill = wantsFill();
+    shell.classList.toggle('mp-fill', fill);
+    if (fitBtn) {
+      fitBtn.classList.toggle('pl-on', fill);
+      fitBtn.title = fill ? '当前：铺满（裁边）— 点按改为完整显示' : '当前：完整显示（留黑边）— 点按改为铺满';
+      fitBtn.textContent = fill ? '⤢' : '⤡';
+    }
+  };
+
+  video.onloadedmetadata = () => {
+    sync();
+    if (video.videoWidth && video.videoHeight) {
+      videoAR = video.videoWidth / video.videoHeight;
+      shell.dataset.videoAr = videoAR.toFixed(3);
+      shell.dataset.videoOrient = videoIsLandscape() ? 'landscape' : 'portrait';
+    }
+    applyFit();      // 拿到真实画幅后再决定铺满与否
+  };
+  if (fitBtn) {
+    fitBtn.onclick = (e) => {
+      e.stopPropagation();
+      // 点一下在「铺满 / 完整显示」之间来回；手动选择后就固定，不再被自动判定覆盖
+      fillMode = wantsFill() ? 'fit' : 'fill';
+      applyFit();
+      kickIdle();          // 操作后重置自动隐藏计时
+    };
+  }
   seek.oninput = () => {
     if (video.duration) video.currentTime = (Number(seek.value) / 1000) * video.duration;
   };
@@ -274,10 +357,44 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
   };
   volEl.oninput = () => { video.volume = Number(volEl.value); };
 
+  // ---- 保命出口 -------------------------------------------------------------
+  // 控制条收起后它 pointer-events:none，✕ 也就点不到了，手机上又没有键盘。
+  // 所以除了「点画面唤出」，再给两条后路，保证任何情况下都退得出去：
+  //   1) Esc 键（桌面），
+  //   2) 返回键 / 手机侧滑返回手势 —— 手机上这是最自然、最不需要教的退出方式。
+  const closePlayer = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    if (typeof onClose === 'function') onClose();
+    else { geom = null; setMode('floating'); }
+  };
+  // 返回键/返回手势：先压一条历史占位，让「返回」落到我们手里而不是直接离开页面
+  let popHandled = false;
+  const onPop = () => { popHandled = true; closePlayer(); };
+  try {
+    history.pushState({ mp: 1 }, '');
+    window.addEventListener('popstate', onPop);
+  } catch (e) { /* 某些环境不允许 pushState，忽略即可 */ }
+  // 关闭时清理：若是点 ✕／Esc／返回 之外的正常关闭，把那条占位历史回吐掉
+  const cleanupBack = () => {
+    window.removeEventListener('popstate', onPop);
+    if (!popHandled) { popHandled = true; try { history.back(); } catch (e) {} }
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape' || e.key === 'Esc') closePlayer();
+  };
+  window.addEventListener('keydown', onKeyDown);
+
   // ---- 尺寸模式：浮动 / 网页内最大化 / 显示器全屏 ----
-  // 没有「内嵌」态：这个播放器打开就是浮动窗（唯一的那扇窗）。
+  // 桌面：打开就是浮动窗，可拖可缩 —— 大屏上「窗口」是有意义的。
+  // 手机：浮动窗毫无意义（屏本来就小，还要你拖动、还要你缩放），
+  //       改成「沉浸式全屏」—— 打开即铺满整屏，只有 ✕ 关闭。
+  //       判定按视口宽度 + 是否粗指针，和 CSS 的 ≤640px 断点保持一致。
+  const isMobile = () => window.innerWidth <= 640
+    || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches
+        && window.innerWidth <= 900);
   const MARGIN = 8, MIN_W = 280, MIN_H = 180;
-  let mode = 'floating';
+  let mode = isMobile() ? 'mobile' : 'floating';
   let geom = null;
 
   const clamp = (g) => {
@@ -314,15 +431,22 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
     shell.classList.toggle('mp-floating', next === 'floating');
     shell.classList.toggle('mp-maximized', next === 'maximized');
     shell.classList.toggle('mp-fullscreen', next === 'fullscreen');
+    shell.classList.toggle('mp-mobile', next === 'mobile');
     if (next === 'floating') { apply(clamp(geom || defaultGeom())); }
     else {
+      // mobile / maximized / fullscreen 都靠 CSS 定位，清掉内联几何
       shell.style.left = ''; shell.style.top = '';
       shell.style.width = ''; shell.style.height = '';
     }
+    // 手机上不需要「网页内最大化」和「缩放手柄」，按钮也随之隐藏（见 CSS）
     maxBtn.classList.toggle('pl-on', next === 'maximized');
     maxBtn.textContent = next === 'maximized' ? '❐' : '⛶';
     maxBtn.title = next === 'maximized' ? '还原播放器' : '网页内最大化';
     fsBtn.classList.toggle('pl-on', next === 'fullscreen');
+    // 切模式后重置自动隐藏计时：进全屏/最大化时先显示一会儿，随后自己淡出。
+    // 用 setTimeout 让它跑在 kickIdle 定义之后（同一个闭包里，函数提升可用，但
+    // 消息队列能确保不早于首次渲染就隐藏，用户看不到「一闪即隐」）。
+    setTimeout(kickIdle, 0);
   };
 
   // 进入/退出全屏：显式驱动，不依赖 fullscreenchange 的时序差异。
@@ -378,11 +502,109 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
   fsBtn.onclick = () => toggleFullscreen();
   mount.querySelector('#mp-close').onclick = (e) => {
     e.stopPropagation();
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     // ✕ ＝ 关掉这次预览。调用方（文件页）负责移除容器。
-    if (typeof onClose === 'function') onClose();
-    else { geom = null; setMode('floating'); }
+    closePlayer();
   };
+
+  // ---- 控制条的自动隐藏 ------------------------------------------------------
+  // 手机上（以及桌面真全屏时）控制条常显会一直挡着画面 —— 播放视频时尤其碍事。
+  // 规则（与主流播放器一致）：
+  //   · 播放中无操作 N 秒 → 淡出（只留画面）
+  //   · 触摸/点击画面、移动鼠标 → 立刻淡入，并重新计时
+  //   · 暂停时永不隐藏（要让你看得见进度）
+  //   · 指针停在控制条/标题栏上时不隐藏（免得想点却消失）
+  const IDLE_MS = 3000;
+  let idleTimer = null;
+  let hoveringUI = false;
+  // hideState.at ＝ 上次「收起控制条」的时刻。点画面时若距此刻不到 300ms，
+  // 一律按「唤出」处理 —— 防止同一次触摸自带的 move/click 序列把它误判成再收起。
+  const hideState = { at: 0 };
+
+  // 这些模式下才自动隐藏：手机沉浸态、桌面最大化、真全屏。
+  // 桌面普通浮动窗是「窗口」，常显才符合桌面直觉，不动它。
+  const autoHideApplies = () =>
+    mode === 'mobile' || mode === 'maximized' || mode === 'fullscreen'
+    || !!document.fullscreenElement;
+
+  const showControls = () => { shell.classList.remove('mp-ui-hidden'); };
+  // hideControls：自动隐藏用（暂停时不隐藏 —— 要让你看得见进度条）。
+  const hideControls = () => {
+    if (video.paused) return;          // 暂停时保持可见
+    if (hoveringUI) return;            // 手正放在控制条上
+    forceHide();
+  };
+  // forceHide：手动点画面时用 —— 用户主动要收起，任何状态都照做（随时能点回来）。
+  const forceHide = () => {
+    hideState.at = Date.now();         // 记录「刚刚收起」，供点画面时判断
+    shell.classList.add('mp-ui-hidden');
+  };
+  const kickIdle = () => {
+    showControls();
+    if (idleTimer) clearTimeout(idleTimer);
+    if (!autoHideApplies()) return;    // 普通浮动窗不自动隐藏
+    idleTimer = setTimeout(hideControls, IDLE_MS);
+  };
+  const stopIdle = () => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    showControls();
+  };
+
+  // 画面上的交互：单击切换控制条显隐（不切播放，避免误触）；
+  // 参考主流 App —— 手机上「点画面 = 显示/隐藏控制条」，播放在中间按钮上。
+  // 但保留原有「点画面切播放/暂停」在桌面浮动窗的行为，免得改变桌面习惯。
+  // 是否「真有 hover」的设备（鼠标）。触摸屏上没有 hover，
+  // 悬停相关的逻辑一律不启用，改用 touch 事件显式配对。
+  const canHover = () => !!(window.matchMedia && window.matchMedia('(hover: hover)').matches);
+  const isImmersive = () => mode === 'mobile' || mode === 'maximized' || mode === 'fullscreen';
+  // 显隐的权威入口只有 video.onclick 一处。
+  // 踩过的坑：点击前浏览器会先派发 pointermove/pointerdown。若在那里也调 kickIdle()
+  // （它会 removeClass），紧接着的 video.onclick 就会看到「已经显示」而执行「收起」，
+  // 两次翻转互相抵消 —— 表现为「点画面没反应 / 隐藏后唤不出来」。
+  // 因此指针移动只做一件事：重置计时器，绝不改变当前显隐状态。
+  const refreshIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (!autoHideApplies()) return;
+    if (shell.classList.contains('mp-ui-hidden')) return;  // 已隐藏就别偷偷又弹出来
+    idleTimer = setTimeout(hideControls, IDLE_MS);
+  };
+  shell.addEventListener('pointermove', refreshIdle, { passive: true });
+  // 鼠标用户在全屏里想唤出控制条：只认「隐藏之后」发生的、且真的移动了一段距离的移动，
+  // 避免同一次点击自带的 move 事件把刚刚收起的控制条又顶出来。
+  let lastX = null, lastY = null;
+  shell.addEventListener('pointermove', (e) => {
+    if (!shell.classList.contains('mp-ui-hidden')) { lastX = e.clientX; lastY = e.clientY; return; }
+    if (!canHover()) return;                       // 触摸设备不靠移动唤出
+    if (lastX === null) { lastX = e.clientX; lastY = e.clientY; return; }
+    const moved = Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY);
+    lastX = e.clientX; lastY = e.clientY;
+    if (moved >= 6) kickIdle();
+  }, { passive: true });
+  // 鼠标悬停在控制条/标题栏上时不要隐藏（否则手要按的按钮半路消失）。
+  // 只对「真正有 hover 的设备」启用这条 —— 触摸屏上 pointerenter 会随手指落下触发，
+  // 而 pointerleave 在手指抬起后往往不再派发，hoveringUI 会被永久卡在 true，
+  // 结果是控制条再也不自动隐藏。触摸设备改用 touchstart/touchend 显式配对。
+  ['#mp-bar', '#mp-dragbar'].forEach((sel) => {
+    const el = mount.querySelector(sel);
+    if (!el) return;
+    el.addEventListener('pointerenter', () => {
+      if (!canHover()) return;                 // 触摸设备忽略，交给 touch 事件
+      hoveringUI = true; showControls();
+    });
+    el.addEventListener('pointerleave', () => {
+      if (!canHover()) return;
+      hoveringUI = false; kickIdle();
+    });
+    // 触摸：按下时暂停计时，抬起后恢复计时（并显式清掉 hoveringUI）
+    el.addEventListener('touchstart', () => { hoveringUI = true; stopIdle(); }, { passive: true });
+    el.addEventListener('touchend', () => { hoveringUI = false; kickIdle(); });
+    el.addEventListener('touchcancel', () => { hoveringUI = false; kickIdle(); });
+  });
+  video.addEventListener('play', kickIdle);
+  video.addEventListener('pause', stopIdle);   // 暂停 → 一直显示
+  video.addEventListener('ended', stopIdle);
+
+  // 清理定时器，避免播放器移除后回调还在跑
+  const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
 
   // ---- 拖动 / 缩放（pointer 事件，鼠标与触摸同一套）----
   function bindDrag(handle, kind) {
@@ -461,22 +683,45 @@ export function openMiniPlayer(mount, { src, title = '', floating = false, onClo
     try { video.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
   });
 
-  // 视口变化时把浮动窗夹回可见区域
-  const reclamp = () => { if (mode === 'floating') { const g = read(); if (g) apply(clamp(g)); } };
-  window.addEventListener('resize', reclamp);
+  // 视口变化时把浮动窗夹回可见区域；手机转屏时还要重新决定「全屏 or 浮动」。
+  // 不做这一步的话，竖屏打开再转横屏就会留下一个错误的几何（或反过来）。
+  const onResize = () => {
+    // 屏幕朝向变了（竖屏↔横屏），横屏视频是否需要铺满也会跟着变，重新判定一次
+    applyFit();
+    const shouldMobile = isMobile();
+    if (shouldMobile && mode !== 'mobile') {
+      // 拉窄到手机尺寸（或从横屏转回竖屏）→ 切沉浸式全屏
+      setMode('mobile');
+      return;
+    }
+    if (!shouldMobile && mode === 'mobile') {
+      // 拉宽到桌面尺寸 → 回到浮动窗
+      setMode('floating');
+      return;
+    }
+    // 模式不变：浮动窗夹回可见区域即可
+    if (mode === 'floating') { const g = read(); if (g) apply(clamp(g)); }
+  };
+  window.addEventListener('resize', onResize);
+  window.addEventListener('orientationchange', onResize);
 
   // 关闭时解绑，避免监听器泄漏
   const origRemove = mount.remove.bind(mount);
   mount.remove = () => {
-    window.removeEventListener('resize', reclamp);
+    clearIdle();                                   // 别让定时器在移除后还跑
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('orientationchange', onResize);
     document.removeEventListener('fullscreenchange', onFsChange);
     document.removeEventListener('webkitfullscreenchange', onFsChange);
+    window.removeEventListener('keydown', onKeyDown);
+    cleanupBack();                                 // 撤掉返回键占用 + 回吐历史占位
     if (mount.__fsWatch) clearInterval(mount.__fsWatch);
     origRemove();
   };
 
-  // 打开即浮动态：给它一个合理的初始几何（右下角、16:9），随后可拖可缩
-  setMode('floating');
+  // 打开即浮动态：给它一个合理的初始几何（右下角、16:9），随后可拖可缩。
+  // 手机上是沉浸式全屏，不需要几何，由 setMode('mobile') 走 CSS 铺满。
+  setMode(isMobile() ? 'mobile' : 'floating');
 
   video.play().catch(() => { /* 自动播放可能被拦，用户点一下即可 */ });
   setIcon();

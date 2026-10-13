@@ -154,13 +154,13 @@ async function render(view) {
             const icon = KIND_ICON[kind] || '📄';
             return `
             <tr data-name="${esc(f.name)}">
-              <td>
+              <td class="fm-cell-name" data-label="名称">
                 <a href="javascript:void 0" class="fm-name" data-open="${esc(f.name)}">
                   ${icon} ${esc(f.name)}
                 </a>
               </td>
-              <td class="muted">${f.dir ? '—' : fmtBytes(f.size)}</td>
-              <td class="muted">${fmtTime(f.mtime)}</td>
+              <td class="muted fm-cell-size" data-label="大小">${f.dir ? '—' : fmtBytes(f.size)}</td>
+              <td class="muted fm-cell-mtime" data-label="修改时间">${fmtTime(f.mtime)}</td>
               <td class="fm-row-actions">
                 <button class="btn xs" data-act="rename" data-name="${esc(f.name)}">重命名</button>
                 <button class="btn xs" data-act="move" data-name="${esc(f.name)}">移动</button>

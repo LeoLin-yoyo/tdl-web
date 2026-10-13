@@ -68,6 +68,16 @@ h1, h2, h3 { font-weight: 600; }
   background: rgba(14, 20, 32, .82); backdrop-filter: blur(8px); z-index: 5;
 }
 #topbar h1 { font-size: 17px; margin: 0; }
+/* 汉堡按钮：只在手机断点出现，桌面端隐藏（桌面有常驻侧边栏，不需要它） */
+.nav-toggle {
+  display: none;
+  background: none; border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 0; font-size: 18px; line-height: 1;
+  cursor: pointer; flex: none;
+}
+.nav-toggle:hover { border-color: var(--accent); color: var(--accent); }
+/* 遮罩默认隐藏；手机断点下由 body.nav-open 控制显隐 */
+#nav-scrim { display: none; }
 #topbar-right { display: flex; align-items: center; gap: 10px; }
 .chip {
   font-size: 12px; background: var(--panel); border: 1px solid var(--border);
@@ -307,12 +317,10 @@ details.adv .adv-body { padding-top: 10px; }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-@media (max-width: 780px) {
-  #sidebar { width: 58px; }
-  .brand-name, .nav-group, #nav a span:not(.ico), #sidebar-footer .muted { display: none; }
-  #nav a { justify-content: center; padding: 10px 8px; }
-  #view { padding: 16px 14px 60px; }
-}
+/* 侧边栏在窄屏的形态改由下方「响应式适配层」接管：
+   ≤640px → 抽屉（含文字）；641–1023px → 64px 图标条。
+   原先这里的 @media(max-width:780px) 会把品牌名/分组标题/导航文字一律藏掉，
+   而 780 也落在手机范围内，导致手机抽屉打开后只有图标没有文字，故删除。 */
 
 /* ---- 在线播放页 ---- */
 .file-row {
@@ -580,9 +588,21 @@ details.adv .adv-body { padding-top: 10px; }
   color: var(--text); padding: 6px 10px; font-size: 13px;
 }
 .fm-table td.fm-row-actions { text-align: right; white-space: nowrap; }
-/* 行内小按钮：默认半透明，悬停整行时才完全显示，界面不至于太吵 */
-.fm-row-actions .btn.xs { opacity: .55; transition: opacity .15s ease; }
-.fm-table tr:hover .fm-row-actions .btn.xs { opacity: 1; }
+/* 行内小按钮：只在真正有鼠标的设备上做「悬停才显形」。
+   触摸屏没有 hover，若照搬会一直停在半透明状态、看着像禁用 —— 手机上点不到。
+   用 @media (hover: hover) 把这条限制住，触屏走下面的常显规则。 */
+@media (hover: hover) {
+  .fm-row-actions .btn.xs { opacity: .55; transition: opacity .15s ease; }
+  .fm-table tr:hover .fm-row-actions .btn.xs { opacity: 1; }
+}
+/* 触摸设备：按钮常显、且撑到 44px 高（Apple HIG / Material 的最小触摸目标） */
+@media (hover: none), (pointer: coarse) {
+  .fm-row-actions .btn.xs {
+    opacity: 1;
+    min-height: 44px; min-width: 44px;
+    padding: 8px 12px; font-size: 13px;
+  }
+}
 .fm-name { cursor: pointer; }
 .fm-name:hover { color: var(--accent); }
 .btn.xs { padding: 2px 8px; font-size: 11.5px; }
@@ -671,6 +691,115 @@ details.adv .adv-body { padding-top: 10px; }
 .mini-player.mp-floating video { cursor: move; }
 .mini-player.mp-floating.mp-dragging video { cursor: move; }
 
+/* 控制条自动隐藏：播放中无操作 3 秒后淡出成一整块干净的画面。
+   只作用于 mp-mobile / mp-maximized / mp-fullscreen（由 JS 加 mp-ui-hidden），
+   桌面普通浮动窗不加这个类，保持常显 —— 窗口的直觉就是要一直看得见控制。 */
+.mini-player .mp-bar,
+.mini-player .mp-dragbar {
+  transition: opacity .28s ease, transform .28s ease;
+}
+.mini-player.mp-ui-hidden .mp-bar {
+  opacity: 0; transform: translateY(100%);
+  pointer-events: none;          /* 隐藏时别吃掉背后的点击 */
+}
+.mini-player.mp-ui-hidden .mp-dragbar {
+  opacity: 0; transform: translateY(-100%);
+  pointer-events: none;
+}
+/* 隐藏时连竖屏提示一起收起，保持画面干净 */
+.mini-player.mp-ui-hidden::after { opacity: 0; }
+/* 隐藏控制条后，画面上的鼠标不再显示「可点」的手型（手机上无影响） */
+.mini-player.mp-ui-hidden video { cursor: none; }
+@media (prefers-reduced-motion: reduce) {
+  .mini-player .mp-bar, .mini-player .mp-dragbar { transition: none; }
+}
+
+/* ---- 手机端：沉浸式全屏（不是浮动窗）--------------------------------------
+   手机上「窗口」这个概念没有意义：屏只有这么大，浮动窗要你拖动、要你缩放，
+   还只能占三成屏幕高（实测 390×844 下视频区仅 205px）。改成打开即铺满整屏：
+   · 不要拖动条、不要缩放手柄、不要「网页内最大化」（与真全屏在手机上等价）
+   · 控制条拆成两层：进度条独占一行（细手指也好按），按钮一行且 ≥44px
+   · 去掉音量条（手机靠物理键），去掉重复的 ⛶
+   · 标题栏精简为「文件名 + ✕」，整条可点关闭，并把安全区算进去
+   · 标题栏与控制条改为「浮在画面之上」而不是上下挤压画面：
+     这样视频区永远是整块屏幕，控制条淡出后画面一点不损失（之前会白占 102px）
+   · 视频用 object-fit: contain —— 完整显示、不裁切、不变形            */
+.mini-player.mp-mobile {
+  position: fixed; inset: 0; z-index: 1300; border-radius: 0;
+  height: 100vh;
+}
+@supports (height: 100dvh) {
+  .mini-player.mp-mobile { height: 100dvh; }   /* 跟着真实可见高度走，不被地址栏裁掉 */
+}
+/* 视频铺满整屏：作为唯一的「底层」，标题栏/控制条浮在它上面 */
+.mini-player.mp-mobile video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  flex: none; object-fit: contain; background: #000;
+}
+/* 手机上不做拖动/缩放，隐藏拖动提示与手柄 */
+.mini-player.mp-mobile .mp-dots { display: none; }
+.mini-player.mp-mobile .mp-resize { display: none; }
+.mini-player.mp-mobile #mp-max { display: none; }      /* 与真全屏等价，去掉重复按钮 */
+.mini-player.mp-mobile .mp-vol { display: none; }      /* 手机音量走物理键 */
+.mini-player.mp-mobile .mp-dragbar { cursor: default; }
+
+/* 标题栏：浮在画面顶部，留出刘海/状态栏安全区（不挤压视频） */
+.mini-player.mp-mobile .mp-dragbar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 6;
+  height: auto; min-height: 48px;
+  padding: env(safe-area-inset-top, 0px) 12px 0 calc(12px + env(safe-area-inset-left, 0px));
+  background: linear-gradient(to bottom, rgba(0,0,0,.9), rgba(0,0,0,.55) 70%, transparent);
+  font-size: 13px;
+}
+/* ✕ 做成 44×44 触摸目标 */
+.mini-player.mp-mobile .mp-x {
+  width: 44px; height: 44px; font-size: 18px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.mini-player.mp-mobile .mp-dl { font-size: 16px; padding: 0 6px; }
+
+/* 画幅自适应：横屏视频配竖屏手机时铺满整屏（左右裁边），不再是中间一小条。
+   判定由 JS 读 videoWidth/videoHeight 得出，加类 mp-fill；用户也可用 ⤡ 手动切换。 */
+.mini-player.mp-mobile.mp-fill video { object-fit: cover; }
+/* 铺满时画面就是背景板，别再叠任何提示文字 */
+.mini-player.mp-mobile.mp-fill::after { display: none; }
+
+/* 控制条：浮在画面底部，两层（进度条一行、按钮一行），同样不挤压视频 */
+.mini-player.mp-mobile .mp-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 6;
+  flex-wrap: wrap; gap: 10px 14px;
+  padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to top, rgba(0,0,0,.92), rgba(0,0,0,.6) 70%, transparent);
+}
+/* 进度条独占整行，且加厚到手指好按 */
+.mini-player.mp-mobile .mp-seek {
+  order: -1; flex: 1 1 100%; height: 26px; margin: 0;
+}
+/* 时间显示在按钮行右侧 */
+.mini-player.mp-mobile .mp-time { min-width: 0; font-size: 12.5px; margin-left: auto; }
+/* 按钮：44px 触摸目标 */
+.mini-player.mp-mobile .mp-bar .btn.xs {
+  min-height: 44px; min-width: 44px; padding: 0 14px; font-size: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* 竖屏时提示可横屏看（视频本身居中留黑边，不加遮挡） */
+.mini-player.mp-mobile::after {
+  content: '横屏观看更清晰';
+  position: absolute; left: 50%; bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  color: rgba(255,255,255,.5); font-size: 12px;
+  background: rgba(0,0,0,.45); padding: 4px 10px; border-radius: 12px;
+  pointer-events: none; transition: opacity .3s ease;
+}
+/* 横屏时不再提示 */
+@media (orientation: landscape) {
+  .mini-player.mp-mobile::after { display: none; }
+}
+/* 触屏设备上即使宽度 >640（如平板竖屏），也不要浮动的拖动/缩放手柄 */
+@media (pointer: coarse) {
+  .mini-player.mp-mobile .mp-resize { display: none; }
+}
+
 /* ---- 设置页：容量上限的「数值 + 单位」 ------------------------------------ */
 /* 数字框占据剩余宽度，单位下拉固定宽度，两者同高对齐 */
 .quota-row { display: flex; gap: 8px; align-items: stretch; }
@@ -682,3 +811,193 @@ details.adv .adv-body { padding-top: 10px; }
   padding: 0 8px; font-size: 13px; cursor: pointer;
 }
 .quota-row select:focus { outline: none; border-color: var(--accent); }
+
+/* ==========================================================================
+   响应式适配层（移动端 / 窄屏）
+   —— 桌面端行为一律不变：以下规则全部包在断点或 (hover/pointer) 条件里。
+   参考 ui-craft/references/responsive.md：
+     · 移动优先，从窄往宽长，不是把桌面压扁
+     · 触摸目标 ≥ 44px；悬停态只在有鼠标的设备上出现
+     · 绝不允许意外横向滚动（320px 起测）
+     · 固定/吸底元素必须尊重安全区 env(safe-area-inset-*)
+     · 用 dvh 而非 vh（手机地址栏伸缩会让 100vh 被裁掉底部）
+   ========================================================================== */
+
+/* ---- 1. 全局：动态视口高度 + 安全区 + 触屏手感 ---------------------------- */
+
+/* 100vh 在手机上量的是「地址栏收起时」的最大高度，实际可见区更矮，
+   于是底部内容被浏览器 chrome 盖住。dvh 跟着真实可见高度走。
+   老浏览器不认 dvh 时回落到 100vh（保留原有行为，不劣化）。 */
+#app { height: 100vh; }
+@supports (height: 100dvh) {
+  #app { height: 100dvh; }
+}
+
+/* 触屏反馈：去掉移动端点击的蓝色高亮块，交给 :active 自己做，
+   并对可点元素消除 300ms 双击缩放延迟。 */
+@media (pointer: coarse) {
+  * { -webkit-tap-highlight-color: transparent; }
+  a, button, .btn, input, select, textarea, [data-open] { touch-action: manipulation; }
+}
+
+/* 尊重系统的「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- 2. 顶栏：给刘海/状态栏让位（横屏刘海机最明显） ---------------------- */
+#topbar { padding-top: calc(14px + env(safe-area-inset-top, 0px)); }
+#sidebar {
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ---- 3. 手机竖屏（≤ 640px）：侧边栏收成抽屉，表格变卡片 ------------------ */
+@media (max-width: 640px) {
+
+  /* 侧边栏改为「抽屉」：默认移出屏幕，点左上角按钮滑入。
+     原先固定 216px / 缩到 58px 的图标条在手机上仍占掉近半屏内容，
+     且图标条没有文字、找不到功能，等于隐藏了导航（responsive.md 明令禁止）。 */
+  #sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 300;
+    width: min(78vw, 280px);
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    box-shadow: 4px 0 24px rgba(0,0,0,.5);
+    overflow-y: auto;
+  }
+  /* 抽屉是「完整菜单」，必须把图标条模式下藏掉的文字全部显示回来：
+     旧规则 @media(max-width:780px) 会隐藏品牌名/分组标题/导航文字，
+     而 780 也覆盖手机 —— 不显式恢复的话，抽屉打开只有图标、没有文字。 */
+  #sidebar .brand-name,
+  #sidebar .nav-group,
+  #nav a span:not(.ico),
+  #sidebar-footer .muted { display: block; }
+  #sidebar .brand-name { display: flex; align-items: baseline; gap: 4px; }
+  #sidebar .nav-group { display: block; }
+  #nav a { justify-content: flex-start; padding: 12px 12px; }
+  body.nav-open #sidebar { transform: translateX(0); }
+  /* 抽屉打开时的遮罩，点它关闭 */
+  #nav-scrim {
+    display: block;
+    position: fixed; inset: 0; z-index: 290;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(2px);
+    opacity: 0; pointer-events: none; transition: opacity .22s ease;
+  }
+  body.nav-open #nav-scrim { opacity: 1; pointer-events: auto; }
+
+  /* 顶栏在这个断点让出左侧空间给「汉堡」按钮 */
+  #topbar { padding: 12px 14px; padding-top: calc(12px + env(safe-area-inset-top, 0px)); gap: 10px; }
+  #topbar h1 { font-size: 16px; }
+  /* 汉堡按钮：44×44 触摸目标 */
+  .nav-toggle { display: inline-flex; align-items: center; justify-content: center;
+                width: 44px; height: 44px; margin-left: -6px; }
+  /* 手机上账号 chip 往往很长，截短避免把标题挤没 */
+  .chip { max-width: 42vw; }
+
+  /* 内容区：收窄内边距，铺满宽度 */
+  #view { padding: 14px 14px calc(28px + env(safe-area-inset-bottom, 0px)); max-width: none; }
+  #view.view--fit { padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
+
+  /* 全局字号：正文最低 16px 以内会触发 iOS 聚焦缩放，输入框单独保底 */
+  input[type=text], input[type=number], input[type=password], textarea, select {
+    font-size: 16px;
+  }
+
+  /* ---- 文件表格 → 卡片 ---- */
+  /* 不改 DOM：把 table/thead/tbody/tr/td 全部转成块级，每一行自然成为一张卡片。
+     这样桌面端仍是一张真正的表格，JS 也无需分支。 */
+  .fm-table { display: block; }
+  .fm-table thead { display: none; }          /* 表头在卡片模式下没有意义 */
+  .fm-table tbody { display: block; }
+
+  .fm-table tr {
+    display: block;
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .fm-table td {
+    display: block;
+    padding: 0;
+    border: none;             /* 卡片里不要表格的分隔线 */
+  }
+  /* 名称一行：大字、可换行、允许长文件名折行而不是溢出 */
+  .fm-cell-name { margin-bottom: 6px; font-size: 15px; }
+  .fm-table .fm-name { word-break: break-word; line-height: 1.45; }
+  /* 大小与时间并排成一行次要信息，用 data-label 自动带出中文标签 */
+  .fm-cell-size, .fm-cell-mtime {
+    display: inline-block;
+    font-size: 12.5px; color: var(--muted); margin-right: 14px;
+  }
+  .fm-cell-size::before { content: attr(data-label) "："; opacity: .75; }
+  .fm-cell-mtime::before { content: attr(data-label) "："; opacity: .75; }
+
+  /* 操作按钮：单独一行、常显、撑到 44px，并换行容纳四个按钮 */
+  .fm-table td.fm-row-actions {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    text-align: left; margin-top: 10px;
+    padding-top: 10px; border-top: 1px solid var(--border-soft);
+  }
+  .fm-table td.fm-row-actions .btn.xs {
+    flex: 1 1 auto; min-width: calc(50% - 4px);
+    min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 13.5px;
+  }
+
+  /* ---- 工具栏 / 过滤栏：竖排铺满，按钮不再挤在一行 ---- */
+  .fm-toolbar { gap: 10px; }
+  .breadcrumb { width: 100%; overflow-x: auto; white-space: nowrap; }
+  .fm-actions { margin-left: 0; width: 100%; flex-wrap: wrap; }
+  .fm-actions .btn {
+    flex: 1 1 auto; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .fm-filter { flex-direction: column; align-items: stretch; gap: 8px; }
+  .fm-filter input { max-width: none; min-height: 44px; }
+
+  /* 通用按钮在窄屏也保底 44px，避免别处出现同样的「点不准」 */
+  .btn.sm { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+
+  /* 卡片内容器不要横向溢出 */
+  .card { overflow-x: clip; }
+
+  /* ---- 播放器浮动窗：窄屏默认铺满可用宽度，避免初始尺寸溢出 ---- */
+  .mini-player.mp-floating {
+    left: 0 !important; right: 0 !important;
+    width: auto !important; max-width: none !important;
+  }
+  .mp-title { font-size: 12.5px; }
+}
+
+/* ---- 4. 平板 / 窄桌面（641–1023px）--------------------------------------- */
+@media (min-width: 641px) and (max-width: 1023px) {
+  /* 侧边栏收成图标条（保留文字的 title 提示），内容区拿回空间 */
+  #sidebar { width: 64px; }
+  .brand-name, .nav-group, #nav a span:not(.ico), #sidebar-footer .muted { display: none; }
+  #nav a { justify-content: center; padding: 12px 8px; }
+  #view { padding: 18px 18px 50px; }
+  /* 卡片网格在这个区间用两列更合理 */
+  .grid.c3 { grid-template-columns: 1fr 1fr; }
+}
+
+/* ---- 5. 大屏：内容不无限拉伸，居中留白 ----------------------------------- */
+@media (min-width: 1440px) {
+  #view { max-width: 1240px; margin: 0 auto; }
+}
+
+/* ---- 6. 触屏（不限宽度）：平板也有手指，通用按钮同样保底 44px ------------ */
+@media (pointer: coarse) {
+  .btn.sm, .btn.xs { min-height: 40px; }
+  /* 触摸设备上任何「悬停才出现」的操作都要常显 */
+  .fm-row-actions .btn.xs, .fm-table tr:hover .fm-row-actions .btn.xs { opacity: 1; }
+}
