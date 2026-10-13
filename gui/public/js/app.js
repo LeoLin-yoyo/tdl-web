@@ -70,6 +70,7 @@ export const STATUS_NAME = {
 // CSRF 令牌：服务端对写操作（非 GET/HEAD）校验双提交令牌，
 // 前端必须带上，否则一律 403。登录成功后由 /api/auth/login 返回并缓存于此。
 let csrfToken = '';
+
 // 是否需要登录认证（由 /api/auth/status 告知）。未启用时后端不拦截，前端也不显示登录入口。
 let authRequired = false;
 
@@ -145,9 +146,24 @@ export function modal(title, bodyHtml) {
       <div class="modal-head"><h3>${esc(title)}</h3><button class="modal-close" title="关闭">✕</button></div>
       <div class="modal-body">${bodyHtml}</div>
     </div>`;
-  const close = () => wrap.remove();
-  wrap.querySelector('.modal-close').onclick = close;
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    wrap.remove();
+  };
   wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+  const onKey = (e) => {
+    // 输入框里按 Esc 交给输入框自己处理（如取消编辑），不顺手关掉整个弹窗
+    if (e.key !== 'Escape') return;
+    // 退出浏览器原生全屏的那次 Esc 不应连带关掉弹窗（用户只是退出全屏）。
+    // 只判断「此刻确实处于全屏中」—— 这是唯一可靠、也无副作用的信号。
+    if (document.fullscreenElement) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+    close();
+  };
+  const closeBtn = wrap.querySelector('.modal-close');
+  if (closeBtn) closeBtn.onclick = close;
+  document.addEventListener('keydown', onKey);
   root.appendChild(wrap);
   return { el: wrap, close };
 }

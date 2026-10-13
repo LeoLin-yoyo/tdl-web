@@ -240,21 +240,24 @@ async function render(view) {
       <div class="fm-modal-foot"><a class="btn sm" href="${rawUrl(p, false)}" download>下载</a></div>`);
   }
 
-  // ---- 视频：内嵌播放，并带浮动窗 / 网页内最大化 ----
+  // ---- 视频：播放器本身就是那个窗口（可拖动、可缩放），不再套弹窗 ----
   function showVideo(name, p) {
-    const m = modal(name, `
-      <div id="fm-player-mount"></div>
-      <div class="fm-modal-foot">
-        <a class="btn sm" href="${rawUrl(p, false)}" download>下载</a>
-      </div>`);
+    // 直接挂到页面根节点：弹窗 + 播放器会出现「两层窗口」，用户看到两个框。
+    // 播放器自带标题栏（显示文件名）、拖动、缩放、✕、全屏，就是唯一的那扇窗。
+    // 插在 modal-root 之上，保证盖住其它内容；打开即浮动态。
+    const host = document.createElement('div');
+    host.id = 'fm-video-window';
+    document.body.appendChild(host);
     try {
-      openMiniPlayer(m.el.querySelector('#fm-player-mount'), {
+      openMiniPlayer(host, {
         src: rawUrl(p),
         title: name,
+        floating: true,
+        downloadUrl: rawUrl(p, false),
+        onClose: () => host.remove(),
       });
     } catch (e) {
-      m.el.querySelector('#fm-player-mount').innerHTML =
-        `<div class="empty">播放器初始化失败：${esc(e.message)}</div>`;
+      host.innerHTML = `<div class="empty" style="padding:16px">播放器初始化失败：${esc(e.message)}</div>`;
     }
   }
 

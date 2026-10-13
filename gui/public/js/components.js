@@ -204,15 +204,17 @@ export function lines(id) {
 // 关键约束同 play.js：全程只切 class，不重建 DOM —— 重新挂载 <video> 会
 // 让浏览器卸载并重载视频源，播放中断、进度归零。
 
-export function openMiniPlayer(mount, { src, title = '' } = {}) {
+export function openMiniPlayer(mount, { src, title = '', floating = false, onClose = null, downloadUrl = '' } = {}) {
   if (!mount) throw new Error('缺少挂载点');
   mount.innerHTML = `
     <div class="mini-player" id="mp-shell">
       <div class="mp-dragbar" id="mp-dragbar">
         <span class="mp-dots">⋮⋮</span>
         <span class="mp-title">${esc(title)}</span>
-        <span class="mp-hint">拖标题移动 · 拖右下角缩放</span>
-        <button class="mp-x" id="mp-close" title="退出浮动窗">✕</button>
+        <span class="mp-actions">
+          ${downloadUrl ? `<a class="mp-dl" href="${esc(downloadUrl)}" download title="下载原文件">⤓</a>` : ''}
+          <button class="mp-x" id="mp-close" title="关闭播放器">✕</button>
+        </span>
       </div>
       <video id="mp-video" playsinline preload="metadata" src="${esc(src)}"></video>
       <div class="mp-bar" id="mp-bar">
@@ -221,8 +223,8 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
         <input type="range" class="mp-seek" id="mp-seek" min="0" max="1000" value="0">
         <button class="btn xs" id="mp-mute">🔊</button>
         <input type="range" class="mp-vol" id="mp-vol" min="0" max="1" step="0.05" value="1">
-        <button class="btn xs" id="mp-float" title="浮动窗（可拖动、可缩放）">⧉</button>
         <button class="btn xs" id="mp-max" title="网页内最大化">⛶</button>
+        <button class="btn xs" id="mp-fs" title="全屏（显示器全屏）">⤢</button>
       </div>
       <div class="mp-resize" id="mp-resize" title="拖动调整大小"></div>
     </div>`;
@@ -234,8 +236,8 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
   const toggle = mount.querySelector('#mp-toggle');
   const muteBtn = mount.querySelector('#mp-mute');
   const volEl = mount.querySelector('#mp-vol');
-  const floatBtn = mount.querySelector('#mp-float');
   const maxBtn = mount.querySelector('#mp-max');
+  const fsBtn = mount.querySelector('#mp-fs');
   const dragbar = mount.querySelector('#mp-dragbar');
   const grip = mount.querySelector('#mp-resize');
 
@@ -252,7 +254,12 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
   const setIcon = () => { toggle.textContent = video.paused ? '▶' : '❚❚'; };
 
   toggle.onclick = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
-  video.onclick = () => toggle.onclick();
+  // 点画面切换播放/暂停 —— 但拖动窗口时不能误触发（拖动结束会把 click 一起送上来）
+  let suppressClick = false;
+  video.onclick = () => {
+    if (suppressClick) { suppressClick = false; return; }
+    toggle.onclick();
+  };
   video.onplay = setIcon;
   video.onpause = setIcon;
   video.ontimeupdate = sync;
@@ -267,9 +274,10 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
   };
   volEl.oninput = () => { video.volume = Number(volEl.value); };
 
-  // ---- 尺寸模式：内嵌 / 浮动 / 网页内最大化 ----
+  // ---- 尺寸模式：浮动 / 网页内最大化 / 显示器全屏 ----
+  // 没有「内嵌」态：这个播放器打开就是浮动窗（唯一的那扇窗）。
   const MARGIN = 8, MIN_W = 280, MIN_H = 180;
-  let mode = 'inline';
+  let mode = 'floating';
   let geom = null;
 
   const clamp = (g) => {
@@ -296,26 +304,85 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
   };
 
   const setMode = (next) => {
+    // 离开浮动态前先记住几何：最大化、全屏、还原都要用到它。
+    // 这一句必须在 mode 被改写之前跑，否则从浮动进全屏时几何会丢，
+    // 退出全屏就只能落回内嵌（而不是原来的浮动窗）。
     if (mode === 'floating' && next !== 'floating') {
       const g = read(); if (g) geom = g;
     }
     mode = next;
     shell.classList.toggle('mp-floating', next === 'floating');
     shell.classList.toggle('mp-maximized', next === 'maximized');
+    shell.classList.toggle('mp-fullscreen', next === 'fullscreen');
     if (next === 'floating') { apply(clamp(geom || defaultGeom())); }
     else {
       shell.style.left = ''; shell.style.top = '';
       shell.style.width = ''; shell.style.height = '';
     }
-    floatBtn.classList.toggle('pl-on', next === 'floating');
     maxBtn.classList.toggle('pl-on', next === 'maximized');
     maxBtn.textContent = next === 'maximized' ? '❐' : '⛶';
     maxBtn.title = next === 'maximized' ? '还原播放器' : '网页内最大化';
+    fsBtn.classList.toggle('pl-on', next === 'fullscreen');
   };
 
-  floatBtn.onclick = () => setMode(mode === 'floating' ? 'inline' : 'floating');
-  maxBtn.onclick = () => setMode(mode === 'maximized' ? 'inline' : 'maximized');
-  mount.querySelector('#mp-close').onclick = (e) => { e.stopPropagation(); setMode('inline'); };
+  // 进入/退出全屏：显式驱动，不依赖 fullscreenchange 的时序差异。
+  // 事件监听只做兜底（比如用户用 F11 或浏览器 UI 退出）。
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      // 退出由 onFsChange 兜底同步；这里不抢先改，避免事件顺序打架
+      return;
+    }
+    if (mode === 'floating') { const g = read(); if (g) geom = g; } // 记住浮动几何
+    shell.requestFullscreen()
+      .then(() => setMode('fullscreen'))
+      .catch(() => toast('无法进入全屏（浏览器限制）', 'error'));
+  };
+  // 从最大化/全屏「还原」时的落点：如果用户是从浮动窗过去的，就回浮动窗；
+  // 只有在用户主动把浮动窗关掉（✕）之后，才落到内嵌。用 geom 是否为空判断。
+  // 还原落点：这个播放器只有「浮动窗」一种常态，最大化/全屏退出后一律回浮动窗
+  const restoreMode = () => 'floating';
+  // 浏览器全屏状态由事件驱动，不在点击处改 mode —— 用户按 Esc 也要能同步。
+  // 注意：靠 fullscreenElement 判断「谁在全屏」在退出时并不可靠（各家浏览器
+  // 清空它的时机不同，Esc 退出时可能已经把 fullscreenElement 置空，
+  // 于是这里的第一个分支不成立、第二个分支又因 mode 还是 'fullscreen' 而
+  // 落回 floating —— 但更糟的情况是事件早于 DOM 更新，导致类卡在全屏态）。
+  // 所以这里不看 fullscreenElement，只看「当前是否还是这台 shell 在占全屏」。
+  const onFsChange = () => {
+    const stillFs = document.fullscreenElement === shell
+      || (document.fullscreenElement && shell.contains(document.fullscreenElement));
+    if (mode === 'fullscreen' && !stillFs) {
+      setMode('floating');
+    }
+  };
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+
+  // 兜底轮询：部分环境（无头浏览器、某些 webkit 版本）在 Esc 退出全屏时
+  // 不派发 fullscreenchange，或派发时机早于 fullscreenElement 更新。
+  // 每 300ms 对账一次 —— 只在处于全屏模式时做，成本可忽略，但能让
+  // 「按 Esc 退出后卡在全屏态」这种卡死状态自动恢复。
+  const fsWatch = setInterval(() => {
+    if (mode !== 'fullscreen') return;
+    if (!document.fullscreenElement && !shell.matches(':fullscreen')) {
+      setMode('floating');
+    }
+  }, 300);
+  mount.__fsWatch = fsWatch;
+
+  // 没有「浮动/内嵌」开关了：这个播放器打开就是浮动的唯一窗口。
+  maxBtn.onclick = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    setMode(mode === 'maximized' ? restoreMode() : 'maximized');
+  };
+  fsBtn.onclick = () => toggleFullscreen();
+  mount.querySelector('#mp-close').onclick = (e) => {
+    e.stopPropagation();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    // ✕ ＝ 关掉这次预览。调用方（文件页）负责移除容器。
+    if (typeof onClose === 'function') onClose();
+    else { geom = null; setMode('floating'); }
+  };
 
   // ---- 拖动 / 缩放（pointer 事件，鼠标与触摸同一套）----
   function bindDrag(handle, kind) {
@@ -365,6 +432,34 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
   }
   bindDrag(dragbar, 'drag');
   bindDrag(grip, 'resize');
+  // 浮动窗下，画面本身也是拖动区（抓哪儿都能拖）。用 capture 阶段先于
+  // video 自己的 click 拿到 pointerdown，判断是否真的移动过。
+  video.addEventListener('pointerdown', (e) => {
+    if (mode !== 'floating') return;
+    const g = read(); if (!g || e.button !== 0) return;
+    const sx = e.clientX, sy = e.clientY;
+    let moved = false;
+    const move = (ev) => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (!moved && Math.hypot(dx, dy) < 4) return; // 4px 死区，避免手抖当拖动
+      moved = true;
+      apply(clamp({ x: g.x + dx, y: g.y + dy, w: g.w, h: g.h }));
+    };
+    const up = (ev) => {
+      video.removeEventListener('pointermove', move);
+      video.removeEventListener('pointerup', up);
+      video.removeEventListener('pointercancel', up);
+      if (moved) {
+        suppressClick = true; // 拖过了，这次 pointerup 带来的 click 不算「点画面」
+        const ng = read(); if (ng) geom = ng;
+      }
+      try { video.releasePointerCapture(ev.pointerId); } catch { /* 未捕获 */ }
+    };
+    video.addEventListener('pointermove', move);
+    video.addEventListener('pointerup', up);
+    video.addEventListener('pointercancel', up);
+    try { video.setPointerCapture(e.pointerId); } catch { /* 老浏览器 */ }
+  });
 
   // 视口变化时把浮动窗夹回可见区域
   const reclamp = () => { if (mode === 'floating') { const g = read(); if (g) apply(clamp(g)); } };
@@ -372,7 +467,16 @@ export function openMiniPlayer(mount, { src, title = '' } = {}) {
 
   // 关闭时解绑，避免监听器泄漏
   const origRemove = mount.remove.bind(mount);
-  mount.remove = () => { window.removeEventListener('resize', reclamp); origRemove(); };
+  mount.remove = () => {
+    window.removeEventListener('resize', reclamp);
+    document.removeEventListener('fullscreenchange', onFsChange);
+    document.removeEventListener('webkitfullscreenchange', onFsChange);
+    if (mount.__fsWatch) clearInterval(mount.__fsWatch);
+    origRemove();
+  };
+
+  // 打开即浮动态：给它一个合理的初始几何（右下角、16:9），随后可拖可缩
+  setMode('floating');
 
   video.play().catch(() => { /* 自动播放可能被拦，用户点一下即可 */ });
   setIcon();
