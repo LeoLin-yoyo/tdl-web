@@ -7,6 +7,7 @@ const tdl = require('./tdl');
 const config = require('./config');
 const db = require('./db');
 const serveDl = require('./serve-dl');
+const resolve = require('./resolve');
 
 const tasks = new Map(); // id -> task (insertion ordered)
 let listeners = new Set();
@@ -362,10 +363,18 @@ function serveArgsFor(t, cfg) {
 // stalled connections, resets, early disconnects, serve-side 5xx/429. Structural
 // errors (Range unsupported, disk full, bad link) are deliberately excluded so
 // they fail fast instead of burning through the retry budget.
+//
+// Permanent *access* errors are excluded too, and explicitly so: a bad chat id,
+// a channel the logged-in account cannot see, or a deleted message is
+// deterministic — retrying it can only waste the budget and leave the task
+// spinning. `classifyResolveError` owns that judgement so the resolver and the
+// downloader agree on what "permanent" means.
 function isTransientTransferError(e) {
+  const msg = String(e.message || e);
+  if (resolve.classifyResolveError(msg) !== 'transient') return false;
   return e.name === 'IncompleteError' || e.name === 'StallError' ||
     /fetch failed|ECONN|ETIMEDOUT|socket hang up|UND_ERR|HTTP 5\d\d|HTTP 429|连接提前断开|无数据|假死|timeout/i
-      .test(String(e.message || e));
+      .test(msg);
 }
 
 async function runDownloadTask(t, cfg) {

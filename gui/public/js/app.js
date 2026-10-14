@@ -127,14 +127,17 @@ export async function api(path, opts = {}) {
 
 // ---- toasts & modal --------------------------------------------------------
 
-export function toast(msg, kind = '') {
+export function toast(msg, kind = '', durationMs = 4000) {
   const box = document.getElementById('toasts');
   const t = document.createElement('div');
   t.className = `toast ${kind}`;
+  // Multi-line diagnostics (e.g. why a link could not be resolved) need to be
+  // readable, so honour the requested duration and keep line breaks visible.
+  t.style.whiteSpace = 'pre-line';
   t.textContent = msg;
   box.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; }, 3600);
-  setTimeout(() => t.remove(), 4000);
+  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; }, Math.max(0, durationMs - 400));
+  setTimeout(() => t.remove(), durationMs);
 }
 
 export function modal(title, bodyHtml) {

@@ -156,11 +156,26 @@ async function submitDl(btn) {
 
   if (!res || res.unparsed || !res.total) return create(urlLines);
 
+  // Permanent failures (no access / message gone) must be reported and must NOT
+  // become a download task: it is deterministic, so creating it only produces a
+  // task that spins or fails for no reason. Transient failures still fall back
+  // to the plain link so a working download is never blocked by the resolver.
+  const failed = (res.links || []).filter((g) => g.errorKind && g.errorKind !== 'transient');
+  if (failed.length) {
+    const detail = failed.slice(0, 3)
+      .map((g) => `${g.link}\n  → ${g.message || g.error || '解析失败'}`)
+      .join('\n');
+    const more = failed.length > 3 ? `\n（另有 ${failed.length - 3} 条同类问题）` : '';
+    toast(`链接无法解析，未创建任务：\n${detail}${more}`, 'error', 12000);
+    if (btn) btn.textContent = label;
+    return { failed: true };
+  }
+
   const good = (res.links || []).filter((g) => g.resources.length);
-  // Links the resolver could not read (deleted / no media / no access) are kept
+  // Links the resolver could not read *transiently* (timeout / network) are kept
   // as-is so the user still gets the task they asked for.
   const bad = (res.links || []).filter((g) => !g.resources.length).map((g) => g.link);
-  if (bad.length) toast(`${bad.length} 条链接无法解析资源，将按原链接直接创建`, 'error');
+  if (bad.length) toast(`${bad.length} 条链接暂时无法解析资源，将按原链接直接创建`, 'error');
 
   // Every link resolved to exactly one resource → nothing to choose. Keep the
   // user's own link (it addresses the same message) so the task card reads the

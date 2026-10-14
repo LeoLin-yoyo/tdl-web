@@ -84,6 +84,40 @@ function splitLinks(text) {
     .filter(Boolean);
 }
 
+// ---- error classification --------------------------------------------------
+//
+// Not every failure deserves the same treatment. A *permanent* failure (bad
+// chat id, deleted message, no access, protected/empty target) is deterministic:
+// retrying it changes nothing, so the caller must surface it instead of creating
+// a task that is guaranteed to fail. A *transient* failure (timeout, network,
+// rate limit) may succeed on a retry, so the caller falls back to the plain
+// download path. Anything unrecognised is treated as transient — the safe
+// direction is to still let the user try, not to block a working link.
+function classifyResolveError(msg) {
+  const s = String(msg || '');
+  if (/CHAT_ID_INVALID|PEER_ID_INVALID|CHANNEL_INVALID|CHAT_FORBIDDEN|channel is inaccessible|not a member|无权访问|不是成员/i.test(s)) {
+    return 'no-access';
+  }
+  if (/MESSAGE_ID_INVALID|MSG_ID_INVALID|MESSAGE_NOT_FOUND|消息不存在|未找到该消息|已删除/i.test(s)) {
+    return 'no-message';
+  }
+  if (/超时|timeout|ETIMEDOUT|ECONN|socket hang up|UND_ERR|HTTP 5\d\d|HTTP 429|FLOOD_WAIT/i.test(s)) {
+    return 'transient';
+  }
+  return 'transient';
+}
+
+// Human-facing copy for a classified failure, so the UI can say WHY instead of
+// a generic "could not parse".
+function explainResolveError(kind, raw) {
+  if (kind === 'no-access') {
+    return '无权访问该频道／会话：当前 tdl 登录的账号不是该私有频道的成员（或频道已不存在）。'
+      + '请用同一账号加入该频道后重试，或换一个有权访问的账号登录。';
+  }
+  if (kind === 'no-message') return '该消息不存在或已被删除。';
+  return String(raw || '解析失败');
+}
+
 // ---- export window ---------------------------------------------------------
 
 // tdl is single-writer only for its bolt store, and this resolver works on its
@@ -201,7 +235,10 @@ async function expandOne(link) {
 }
 
 // Resolve a batch of links. Each entry reports its own outcome so one bad link
-// does not hide the others; `error` marks a link the resolver could not read.
+// does not hide the others; `error` marks a link the resolver could not read,
+// and `errorKind` says whether that is permanent (`no-access` / `no-message`,
+// which the caller must NOT turn into a download task) or `transient` (which the
+// caller may retry via the plain download path).
 async function resolveText(text) {
   const seen = new Set();
   const links = [];
@@ -218,14 +255,26 @@ async function resolveText(text) {
     try {
       out.push(await expandOne(link));
     } catch (e) {
-      out.push({ link: link.source, resources: [], error: String(e.message || e) });
+      const raw = String(e.message || e);
+      const kind = classifyResolveError(raw);
+      out.push({
+        link: link.source,
+        resources: [],
+        error: raw,
+        errorKind: kind,
+        message: explainResolveError(kind, raw),
+      });
     }
   }
   const resources = out.flatMap((g) => g.resources);
+  // A link resolved to nothing *and* was flagged permanent is a hard failure:
+  // the caller must report it rather than creating a doomed task.
+  const failed = out.filter((g) => g.errorKind && g.errorKind !== 'transient');
   return {
     links: out,
     resources,
     total: resources.length,
+    failed,
     // true when every link resolved to exactly one file: the caller can then
     // create the task directly instead of asking the user to choose.
     trivial: out.every((g) => g.resources.length === 1),
@@ -239,4 +288,4 @@ function resolve(text) {
   return next;
 }
 
-module.exports = { resolve, parseLink, splitLinks };
+module.exports = { resolve, parseLink, splitLinks, classifyResolveError, explainResolveError };
