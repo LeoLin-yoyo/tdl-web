@@ -7,7 +7,9 @@ const tdl = require('./tdl');
 const config = require('./config');
 const db = require('./db');
 const serveDl = require('./serve-dl');
-const resolve = require('./resolve');
+// NOTE: resolve must NOT be required at top level. resolve → stream → tasks
+// would close a require cycle; stream would then capture this module's
+// (still-empty) exports and lose buildDlArgs/listServeSessions at runtime.
 
 const tasks = new Map(); // id -> task (insertion ordered)
 let listeners = new Set();
@@ -370,6 +372,8 @@ function serveArgsFor(t, cfg) {
 // spinning. `classifyResolveError` owns that judgement so the resolver and the
 // downloader agree on what "permanent" means.
 function isTransientTransferError(e) {
+  // Lazy require — see the cycle note at the top of this file.
+  const resolve = require('./resolve');
   const msg = String(e.message || e);
   if (resolve.classifyResolveError(msg) !== 'transient') return false;
   return e.name === 'IncompleteError' || e.name === 'StallError' ||
