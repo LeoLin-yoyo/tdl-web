@@ -277,6 +277,10 @@ function snapshot(t, { withLogs = false } = {}) {
   const doneBytes = items.reduce((s, i) => s + (i.done || 0), 0);
   // sum the numeric rates (not the label strings) for an accurate card total
   const totalBps = items.reduce((s, i) => s + (i.state === 'active' ? (i.speedBps || 0) : 0), 0);
+  // ETA = remaining bytes / smoothed aggregate rate. Below 4KB/s the quotient
+  // is pure noise (hundreds of hours), so it stays 0 and the card hides it.
+  const etaMs = t.status === 'running' && totalBps >= 4096 && totalBytes > doneBytes
+    ? Math.round(((totalBytes - doneBytes) / totalBps) * 1000) : 0;
   return {
     id: t.id, type: t.type, title: t.title, ns: t.config.ns || config.load().ns,
     status: t.status, error: t.error, exitCode: t.exitCode,
@@ -294,7 +298,7 @@ function snapshot(t, { withLogs = false } = {}) {
     counters: {
       itemsKnown: t.items.size, done: doneCount, failed: t.failedItems,
       active: [...t.items.values()].filter((i) => i.state === 'active').length,
-      totalBytes, doneBytes,
+      totalBytes, doneBytes, etaMs,
       speed: fmtBps(totalBps),
     },
     items,
@@ -558,6 +562,8 @@ async function runDownloadTask(t, cfg) {
               label: info.name, path: info.path, done, total,
               pct: total ? Math.round((done / total) * 100) : 0,
               speed: it.speedBps ? fmtBps(it.speedBps) : '',
+              etaMs: it.speedBps > 0 && total > done
+                ? Math.round(((total - done) / it.speedBps) * 1000) : 0,
               state: 'active', updatedAt: now,
             });
             t.dirty = true;

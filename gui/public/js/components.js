@@ -11,7 +11,7 @@ function itemRow(it) {
     ? fmtBytes(it.size || it.total)
     : `${fmtBytes(it.done)}${it.total ? ' / ' + fmtBytes(it.total) : ''}`;
   const speed = it.state === 'active'
-    ? `<span class="item-speed">${esc(it.speed || '—')}</span>`
+    ? `<span class="item-speed">${esc(it.speed || '—')}${it.etaMs > 0 ? ` · 剩 ${fmtDur(it.etaMs)}` : ''}</span>`
     : '';
   // tdl reports the absolute destination path in its progress line
   const pathLine = it.path
@@ -32,6 +32,7 @@ function statsHtml(t) {
   parts.push(`文件 <b>${c.done || 0}</b>${c.failed ? ` <span style="color:var(--fail)">失败 ${c.failed}</span>` : ''}${c.active ? ` · 进行 ${c.active}` : ''}`);
   if (c.totalBytes) parts.push(`${fmtBytes(c.doneBytes || 0)} / ${fmtBytes(c.totalBytes)}`);
   if (c.speed) parts.push(`<b>${esc(String(c.speed))}</b>`);
+  if (c.etaMs > 0) parts.push(`<span title="预计 ${fmtTime(Date.now() + c.etaMs)} 完成">剩余 <b>${fmtDur(c.etaMs)}</b></span>`);
   if (t.finishedAt && t.startedAt) parts.push(`耗时 <b>${fmtDur(t.finishedAt - t.startedAt)}</b>`);
   return parts.map((x) => `<span>${x}</span>`).join('');
 }
