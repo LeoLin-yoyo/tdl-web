@@ -117,6 +117,18 @@ const DEFAULTS = {
   managedDir: '',
   // 受管目录的容量上限（GB）。0 = 不限制。
   managedQuotaGB: 0,
+
+  // ---- MTProto 代理桥接 ------------------------------------------------------
+  //
+  // tdl 只支持 socks5/http，MTProto 代理由 lib/mtproto.js 在本地做桥接：
+  // 启用后所有 tdl 调用的 --proxy 自动指向本地桥（socks5://127.0.0.1:端口），
+  // 桥再直连 MTProto 服务器（该协议本身为直连设计，不走上面填的代理）。
+  mtprotoEnabled: false,
+  // 代理链接，一行一条（https://t.me/proxy?... 或 tg://proxy?...）。
+  // 存的是用户自己的配置数据，不是内置凭据。
+  mtprotoLinks: '',
+  // 本地桥接监听端口。
+  mtprotoPort: 8565,
 };
 
 // 受管目录的默认位置：gui/data/managed。
@@ -241,6 +253,11 @@ function save(patch) {
     ? Math.min(Math.round(quota * 1e6) / 1e6, 1024 * 1024)
     : 0;
 
+  // ---- MTProto 代理桥接 ----
+  next.mtprotoEnabled = next.mtprotoEnabled === true || next.mtprotoEnabled === 'true';
+  next.mtprotoLinks = String(next.mtprotoLinks == null ? '' : next.mtprotoLinks).trim();
+  next.mtprotoPort = clamp(next.mtprotoPort, DEFAULTS.mtprotoPort, 1024, 65535);
+
   cache = next;
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -280,7 +297,14 @@ function downloadDefaults() {
 // Runtime knobs derived from config.
 function globalArgs(cfg) {
   const args = [];
-  if (cfg.proxy) args.push('--proxy', cfg.proxy);
+  // MTProto 桥启用且有合法链接时，--proxy 指向本地桥（lib/mtproto.js 负责
+  // 桥的启停）。懒加载避免 config ↔ mtproto 的加载期耦合。
+  let proxy = cfg.proxy;
+  if (cfg.mtprotoEnabled) {
+    const { parseLinks } = require('./mtproto');
+    if (parseLinks(cfg.mtprotoLinks).length) proxy = `socks5://127.0.0.1:${cfg.mtprotoPort}`;
+  }
+  if (proxy) args.push('--proxy', proxy);
   if (cfg.ns) args.push('--ns', cfg.ns);
   if (cfg.ntp) args.push('--ntp', cfg.ntp);
   if (cfg.reconnectTimeout) args.push('--reconnect-timeout', `${cfg.reconnectTimeout}s`);

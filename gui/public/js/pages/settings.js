@@ -1,6 +1,6 @@
 // Settings: proxy / ns / dir / perf defaults, server info.
 
-import { api, esc, store, registerRoute, toast, fmtTime, setCsrfToken } from '../app.js';
+import { api, esc, store, registerRoute, toast, fmtTime, setCsrfToken, fmtBytes } from '../app.js';
 
 async function render(view) {
   const cfg = store.config || {};
@@ -100,6 +100,28 @@ async function render(view) {
       </div>
       <button class="btn primary" id="s-save">保存设置</button>
       <span class="hint muted small" style="margin-left:8px">保存到 SQLite（app_state）与 gui/data/gui-config.json</span>
+      </div>
+    </div>
+
+    <div class="card" id="mtproto-card">
+      <h2>MTProto 代理（实验）</h2>
+      <div class="hint muted small" style="margin-bottom:12px">
+        tdl 原生只支持 socks5/http 代理；启用后会在本地起一个桥接服务（socks5://127.0.0.1:下方端口），
+        把所有 tdl 流量经 MTProto 协议直连代理服务器——<strong>不经过上面填的 --proxy</strong>，适合机场线路不稳时换路。
+        链接一行一条，支持 https://t.me/proxy?... 或 tg://proxy?... 格式，多条自动轮询分流。
+      </div>
+      <label class="check-row"><input type="checkbox" id="mtp-enable" ${cfg.mtprotoEnabled ? 'checked' : ''}> 启用 MTProto 桥接（保存后立即生效）</label>
+      <div class="field" style="margin-top:8px"><label>代理链接（每行一条）</label>
+        <textarea id="mtp-links" rows="3" placeholder="https://t.me/proxy?server=…&port=443&secret=…">${esc(cfg.mtprotoLinks || '')}</textarea></div>
+      <div class="grid c2">
+        <div class="field"><label>本地桥接端口</label>
+          <input type="number" id="mtp-port" value="${cfg.mtprotoPort ?? 8565}" min="1024" max="65535"></div>
+        <div class="field"><label>桥状态</label><div class="hint" id="mtp-status">检测中…</div></div>
+      </div>
+      <div style="margin-top:8px">
+        <button class="btn primary" id="mtp-save">保存</button>
+        <button class="btn" id="mtp-test">测试连接</button>
+        <span class="hint muted small" id="mtp-test-out" style="margin-left:8px"></span>
       </div>
     </div>
 
@@ -388,6 +410,52 @@ async function render(view) {
     takeout: view.querySelector('#s-takeout').checked,
     desc: view.querySelector('#s-desc').checked,
   }, view.querySelector('#s-save-dl'));
+
+  // ---- MTProto 代理 ----------------------------------------------------------
+  const mtpStatus = view.querySelector('#mtp-status');
+  async function refreshMtpStatus() {
+    try {
+      const r = await api('/api/mtproto/stats');
+      const s = r.stats || {};
+      mtpStatus.innerHTML = s.running
+        ? `运行中 · ${s.links} 条链接 · 活跃连接 ${s.active} · 已中转 ${fmtBytes(s.down + s.up)}`
+        : '未运行（未启用或没有合法链接）';
+    } catch { mtpStatus.textContent = '状态未知'; }
+  }
+  refreshMtpStatus();
+
+  view.querySelector('#mtp-save').onclick = () => {
+    saveConfig({
+      mtprotoEnabled: view.querySelector('#mtp-enable').checked,
+      mtprotoLinks: view.querySelector('#mtp-links').value.trim(),
+      mtprotoPort: Number(view.querySelector('#mtp-port').value) || 8565,
+    }, view.querySelector('#mtp-save'));
+    setTimeout(refreshMtpStatus, 800);
+  };
+
+  view.querySelector('#mtp-test').onclick = async () => {
+    const out = view.querySelector('#mtp-test-out');
+    const btn = view.querySelector('#mtp-test');
+    const lines = view.querySelector('#mtp-links').value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    if (!lines.length) { out.textContent = '请先填写至少一条链接'; return; }
+    btn.disabled = true;
+    out.textContent = `正在测试 ${lines.length} 条链接…`;
+    const results = [];
+    for (const line of lines) {
+      let host = line;
+      try { host = new URL(line).searchParams.get('server') || line; } catch { /* keep raw */ }
+      try {
+        const r = await api('/api/mtproto/test', { method: 'POST', body: { link: line } });
+        results.push(r.ok && r.result.ok
+          ? `${host}：✅ 可用（连接 ${r.result.connectMs}ms）`
+          : `${host}：❌ ${(r.result && r.result.note) || r.error || '不可用'}`);
+      } catch (e) {
+        results.push(`${host}：❌ ${String(e.message || e)}`);
+      }
+    }
+    out.innerHTML = results.map(esc).join('　·　');
+    btn.disabled = false;
+  };
 
   // ---- 访问认证开关 --------------------------------------------------------
   // 未启用：显示启用表单；已启用：显示关闭按钮。

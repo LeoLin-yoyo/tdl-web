@@ -209,6 +209,31 @@ tdlVersion().catch(() => {});
 // version call, and tdl is single-writer.
 setTimeout(() => { login.detectLogin().catch(() => {}); }, 3000);
 
+// ---- MTProto bridge lifecycle -------------------------------------------------
+//
+// The bridge mirrors the saved settings: enabled + valid links → listening on
+// mtprotoPort, otherwise stopped. Resynced at boot and after every settings
+// save (same hot-apply pattern as resolveTdl). No credentials here: links
+// come from the user's saved config at runtime.
+const mtproto = require('./lib/mtproto');
+let mtprotoKey = '';
+function syncMtprotoBridge() {
+  const cfg = config.load();
+  const links = cfg.mtprotoEnabled ? mtproto.parseLinks(cfg.mtprotoLinks) : [];
+  const key = JSON.stringify(links.map((l) => [l.server, l.port, [...l.secret16]])) + `@${cfg.mtprotoPort}`;
+  if (key === mtprotoKey) return Promise.resolve();
+  mtprotoKey = key;
+  if (!links.length) {
+    mtproto.stopBridge();
+    console.log('[mtproto] 桥已停止');
+    return Promise.resolve();
+  }
+  return mtproto.startBridge(cfg.mtprotoPort, links)
+    .then(() => { console.log(`[mtproto] 桥已启动 socks5://127.0.0.1:${cfg.mtprotoPort}，${links.length} 条链接`); })
+    .catch((e) => { console.error(`[mtproto] ${e.message}`); });
+}
+setTimeout(() => { syncMtprotoBridge(); }, 1500);
+
 // ---- API router --------------------------------------------------------------
 
 async function api(req, res, pathname, searchParams) {
@@ -355,11 +380,27 @@ async function api(req, res, pathname, searchParams) {
     const next = config.save(body.config || {});
     // a changed tdl path must take effect immediately, not after a restart
     resolveTdl();
+    syncMtprotoBridge(); // the MTProto bridge follows the saved settings too
     return sendJson(res, 200, {
       ...configPayload(),
       tdlPath: global.TDL_PATH,
       tdlFound: !!config.locateTdl(),
     });
+  }
+  // ---- MTProto bridge (lib/mtproto.js) ----
+  if (method === 'GET' && p === '/api/mtproto/stats') {
+    return sendJson(res, 200, { stats: mtproto.stats() });
+  }
+  if (method === 'POST' && p === '/api/mtproto/test') {
+    // handshake probe for ONE link the user pasted (parsed + private-host
+    // guarded in lib/mtproto.js); raw TCP to a public MTProto server only
+    const body = await readBody(req);
+    try {
+      const link = mtproto.parseLink(body.link || '');
+      return sendJson(res, 200, { ok: true, result: await mtproto.testLink(link) });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, error: String(e.message || e) });
+    }
   }
   // ---- tdl auto-download (lib/tdlfetch.js) ----
   if (method === 'GET' && p === '/api/tdl/status') {
